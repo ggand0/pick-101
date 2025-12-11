@@ -12,6 +12,7 @@ dependencies = [
     "mujoco>=3.0.0",
     "gymnasium[mujoco]>=1.0.0",
     "stable-baselines3>=2.0.0",
+    "imageio[ffmpeg]>=2.30.0",
 ]
 
 [tool.uv.sources]
