@@ -1,0 +1,42 @@
+# HER (Hindsight Experience Replay) experiment - 1M timesteps
+experiment:
+  name: "pick_cube_her"
+  base_dir: "runs"
+
+# Training parameters
+training:
+  timesteps: 1000000
+  eval_freq: 10000
+  save_freq: 50000
+  seed: 42
+
+# SAC hyperparameters
+sac:
+  learning_rate: 3.0e-4
+  buffer_size: 1000000  # Larger buffer for HER
+  learning_starts: 1000
+  batch_size: 256
+  tau: 0.005
+  gamma: 0.98  # Slightly lower for sparse rewards
+  train_freq: 1
+  gradient_steps: 1
+
+# HER parameters
+her:
+  n_sampled_goal: 4          # Virtual transitions per real transition
+  goal_selection_strategy: "future"  # 'future', 'final', or 'episode'
+
+# Environment (GoalEnv)
+env:
+  normalize_obs: true
+  normalize_reward: false  # Don't normalize sparse rewards
+  max_episode_steps: 200
+  action_scale: 0.1
+  reward_type: "sparse"    # "sparse" or "dense"
+  distance_threshold: 0.03
+
+# Evaluation/recording
+eval:
+  episodes: 10
+  video_width: 640
+  video_height: 480
