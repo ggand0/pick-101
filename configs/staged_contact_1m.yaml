@@ -1,0 +1,53 @@
+# Staged rewards with contact-based grasp detection - 1M timesteps
+# Fix for reward hacking: now requires physical contact, not just proximity
+experiment:
+  name: "pick_cube_contact"
+  base_dir: "runs"
+
+# Training parameters
+training:
+  timesteps: 1000000
+  eval_freq: 10000
+  save_freq: 50000
+  seed: 42
+
+# SAC hyperparameters
+sac:
+  learning_rate: 3.0e-4
+  buffer_size: 100000
+  learning_starts: 1000
+  batch_size: 256
+  tau: 0.005
+  gamma: 0.99
+  train_freq: 1
+  gradient_steps: 1
+
+# Environment
+env:
+  normalize_obs: true
+  normalize_reward: true
+  max_episode_steps: 200
+  action_scale: 0.1
+
+# Reward shaping (staged rewards with contact detection)
+reward:
+  # Thresholds (grasp_distance_threshold no longer used - we use contact detection)
+  grasp_distance_threshold: 0.02  # Tighter, but contact is primary check
+  gripper_closed_threshold: 0.3
+  lift_height_threshold: 0.03
+  success_threshold: 0.05         # Slightly relaxed for bowl placement
+
+  # Reward weights
+  reach_weight: 1.0
+  grasp_bonus: 0.5                # Reduced - contact is harder to fake
+  lift_bonus: 2.0
+  lift_height_scale: 10.0
+  place_weight: 2.0
+  success_bonus: 10.0
+  drop_penalty: 5.0
+
+# Evaluation/recording
+eval:
+  episodes: 5
+  video_width: 640
+  video_height: 480

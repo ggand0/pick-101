@@ -123,15 +123,38 @@ class PickCubeEnv(gym.Env):
         gripper_qpos_addr = self.model.jnt_qposadr[gripper_joint_id]
         return self.data.qpos[gripper_qpos_addr]
 
+    def _has_cube_contact(self) -> bool:
+        """Check if gripper is in contact with the cube."""
+        cube_geom_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom"
+        )
+        # Gripper geoms are 25-30 (gripper body and moving_jaw)
+        gripper_geom_ids = set(range(25, 31))
+
+        for i in range(self.data.ncon):
+            geom1 = self.data.contact[i].geom1
+            geom2 = self.data.contact[i].geom2
+
+            # Check if contact is between gripper and cube
+            if geom1 == cube_geom_id and geom2 in gripper_geom_ids:
+                return True
+            if geom2 == cube_geom_id and geom1 in gripper_geom_ids:
+                return True
+
+        return False
+
     def _is_grasping(self, gripper_pos: np.ndarray, cube_pos: np.ndarray) -> bool:
-        """Check if gripper is grasping the cube."""
-        distance = np.linalg.norm(gripper_pos - cube_pos)
+        """Check if gripper is grasping the cube.
+
+        Requires BOTH:
+        1. Physical contact between gripper and cube
+        2. Gripper is closed
+        """
         gripper_state = self._get_gripper_state()
-
-        is_close = distance < self.grasp_distance_threshold
         is_closed = gripper_state < self.gripper_closed_threshold
+        has_contact = self._has_cube_contact()
 
-        return is_close and is_closed
+        return is_closed and has_contact
 
     def _get_info(self) -> dict[str, Any]:
         """Get additional info."""
@@ -142,6 +165,7 @@ class PickCubeEnv(gym.Env):
         cube_to_target = np.linalg.norm(cube_pos - self.target_pos)
         cube_z = cube_pos[2]
 
+        has_contact = self._has_cube_contact()
         is_grasping = self._is_grasping(gripper_pos, cube_pos)
         is_lifted = is_grasping and cube_z > self.lift_height_threshold
 
@@ -151,6 +175,7 @@ class PickCubeEnv(gym.Env):
             "cube_pos": cube_pos.copy(),
             "gripper_pos": gripper_pos.copy(),
             "gripper_state": self._get_gripper_state(),
+            "has_contact": has_contact,
             "is_grasping": is_grasping,
             "is_lifted": is_lifted,
             "is_success": cube_to_target < self.success_threshold,
