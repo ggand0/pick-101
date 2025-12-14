@@ -285,12 +285,17 @@ class LiftCubeCartesianEnv(gym.Env):
 
             # Grasp bonus: cube pinched between gripper and jaw
             if info["is_grasping"]:
-                reward += 0.25
+                reward += 0.5
 
-            # Lift bonus: cube height above ground
+            # Lift reward: continuous based on cube height (incentivize lifting)
             cube_z = info["cube_z"]
-            if cube_z > 0.02:
-                reward += 1.0
+            # Cube starts at z=0.01, give reward for any lift above that
+            lift_reward = max(0, (cube_z - 0.01) * 50.0)  # 0.05m lift = 2.5 reward
+            reward += lift_reward
+
+            # Big bonus for reaching target height
+            if cube_z > self.lift_height:
+                reward += 2.0
 
             # Success bonus
             if info["is_success"]:
