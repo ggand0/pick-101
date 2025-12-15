@@ -173,14 +173,33 @@ def main():
     # Use CLI timesteps if provided, otherwise use config
     timesteps = args.timesteps if args.timesteps is not None else train_cfg["timesteps"]
 
-    print(f"\nStarting Lift (Cartesian) training for {timesteps} timesteps...")
+    # When resuming, we want to continue the timestep counter from where we left off
+    # reset_num_timesteps=False tells SB3 to:
+    # 1. NOT reset num_timesteps to 0
+    # 2. ADD num_timesteps to total_timesteps internally (so we pass just the additional steps)
+    if args.resume:
+        # Model already has num_timesteps from checkpoint, verify it matches
+        print(f"Loaded model num_timesteps: {model.num_timesteps}")
+        reset_num_timesteps = False
+        # Pass ONLY the additional steps - SB3 will add num_timesteps internally
+        learn_timesteps = timesteps
+        target_total = model.num_timesteps + timesteps
+        print(f"\nResuming Lift (Cartesian) training from step {model.num_timesteps}...")
+        print(f"Training for {timesteps} additional timesteps (target: {target_total} total)")
+    else:
+        reset_num_timesteps = True
+        learn_timesteps = timesteps
+        target_total = timesteps
+        print(f"\nStarting Lift (Cartesian) training for {timesteps} timesteps...")
+
     print(f"Action space: delta XYZ + gripper (4 dims)")
     print(f"Output directory: {output_dir}")
 
     model.learn(
-        total_timesteps=timesteps,
+        total_timesteps=learn_timesteps,
         callback=[checkpoint_callback, eval_callback, plot_callback],
         progress_bar=True,
+        reset_num_timesteps=reset_num_timesteps,
     )
 
     model.save(output_dir / "final_model")
