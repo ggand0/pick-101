@@ -176,10 +176,9 @@ class LiftCubeCartesianEnv(gym.Env):
     def _get_info(self) -> dict[str, Any]:
         gripper_pos = self.ik.get_ee_position()
         cube_pos = self.data.sensor("cube_pos").data.copy()
-        grasp_pos = self.data.sensor("grasp_pos").data.copy()
 
-        # Use grasp_pos (between fingers) for reach reward, not gripper_pos (TCP)
-        gripper_to_cube = np.linalg.norm(grasp_pos - cube_pos)
+        # Use gripper_pos (TCP at fingertips) for reach reward
+        gripper_to_cube = np.linalg.norm(gripper_pos - cube_pos)
         cube_z = cube_pos[2]
         is_grasping = self._is_grasping()
         is_lifted = is_grasping and cube_z > self.lift_height
