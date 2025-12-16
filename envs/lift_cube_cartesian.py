@@ -126,14 +126,19 @@ class LiftCubeCartesianEnv(gym.Env):
         return self.data.qpos[gripper_qpos_addr]
 
     def _check_cube_contacts(self) -> tuple[bool, bool]:
-        """Check if cube contacts static gripper and moving jaw separately."""
+        """Check if cube contacts static gripper and moving jaw separately.
+
+        Uses hardcoded geom ID ranges based on XML loading order:
+        - Gripper body geoms: IDs 25-28 (static gripper part)
+        - Moving jaw geoms: IDs 29-30 (moving jaw mesh)
+        """
         cube_geom_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom"
         )
-        # Geoms 25-28: static gripper body
-        # Geoms 29-30: moving jaw
-        static_gripper_geoms = set(range(25, 29))
-        moving_jaw_geoms = set(range(29, 31))
+        # Gripper body geoms (static part)
+        gripper_geom_ids = set(range(25, 29))
+        # Moving jaw geoms
+        jaw_geom_ids = set(range(29, 31))
 
         has_gripper_contact = False
         has_jaw_contact = False
@@ -149,9 +154,9 @@ class LiftCubeCartesianEnv(gym.Env):
                 other_geom = geom1
 
             if other_geom is not None:
-                if other_geom in static_gripper_geoms:
+                if other_geom in gripper_geom_ids:
                     has_gripper_contact = True
-                if other_geom in moving_jaw_geoms:
+                if other_geom in jaw_geom_ids:
                     has_jaw_contact = True
 
         return has_gripper_contact, has_jaw_contact

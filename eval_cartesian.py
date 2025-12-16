@@ -111,6 +111,16 @@ def main():
         imageio.mimsave(str(wide2_path), frames_wide2, fps=args.fps)
         print(f"Saved wide2 video to {wide2_path}")
 
+    # Save combined video (all 3 views horizontally concatenated)
+    if frames_closeup and frames_wide and frames_wide2:
+        frames_combined = [
+            np.concatenate([c, w, w2], axis=1)
+            for c, w, w2 in zip(frames_closeup, frames_wide, frames_wide2)
+        ]
+        combined_path = output_path.with_stem(output_path.stem + "_combined")
+        imageio.mimsave(str(combined_path), frames_combined, fps=args.fps)
+        print(f"Saved combined video to {combined_path}")
+
     print(f"\nSummary:")
     print(f"  Mean reward: {np.mean(total_rewards):.2f} +/- {np.std(total_rewards):.2f}")
     print(f"  Success rate: {100 * np.mean(successes):.1f}%")
