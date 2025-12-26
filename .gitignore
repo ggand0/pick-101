@@ -1,6 +1,9 @@
 CLAUDE.md
+wait_and_train.sh
 **/*.mp4
 devlogs/
+tmp/
+docs/research/
 runs/
 
 # Byte-compiled / optimized / DLL files
