@@ -150,7 +150,9 @@ def run_horizontal_grasp(cube_height=0.06, viewer=None):
 
     # Step 1: Approach - target finger_midpoint to cube (not graspframe)
     # We compute where graspframe needs to be so that finger_mid lands on cube
-    print("\nApproaching (targeting finger_mid to cube)...")
+    # Lock wrist_flex at 0 (horizontal) to test horizontal grasp
+    target_wrist_flex = 0.0
+    print(f"\nApproaching (targeting finger_mid to cube, wrist_flex locked at {target_wrist_flex})...")
     for step in range(1000):
         # Where is finger_mid relative to graspframe?
         graspframe_pos = ik.get_ee_position()
@@ -164,6 +166,8 @@ def run_horizontal_grasp(cube_height=0.06, viewer=None):
         graspframe_target = actual_cube_pos - offset
 
         ctrl = ik.step_toward_target(graspframe_target, gripper_action=1.0, gain=0.5)
+        # Override wrist_flex to stay horizontal
+        ctrl[3] = target_wrist_flex
         data.ctrl[:] = ctrl
         step_sim()
 
@@ -190,7 +194,9 @@ def run_horizontal_grasp(cube_height=0.06, viewer=None):
 
     # Step 2: Close (maintain finger_mid position)
     print("\nClosing gripper...")
-    grasp_action = 1.0
+    grasp_action = 1.0  # Start open
+    contact_step = None
+    tighten_amount = 0.1  # Close a bit more after contact
     for step in range(500):
         t = min(step / 350, 1.0)
         gripper_action = 1.0 - 2.0 * t
@@ -202,16 +208,36 @@ def run_horizontal_grasp(cube_height=0.06, viewer=None):
         graspframe_target = actual_cube_pos - offset
 
         ctrl = ik.step_toward_target(graspframe_target, gripper_action=gripper_action, gain=0.5)
+        ctrl[3] = target_wrist_flex  # Keep horizontal
         data.ctrl[:] = ctrl
         step_sim()
 
-        if is_grasping() and data.qpos[gripper_qpos_addr] < 0.25:
-            grasp_action = gripper_action
-            print(f"  Grasp at step {step}")
-            break
+        gripper_qpos = data.qpos[gripper_qpos_addr]
+        if step % 100 == 0:
+            print(f"  step {step}: gripper_action={gripper_action:.2f}, qpos={gripper_qpos:.3f}, grasping={is_grasping()}")
+
+        # Detect initial contact, then tighten a bit more before stopping
+        if is_grasping() and contact_step is None:
+            contact_step = step
+            contact_action = gripper_action
+            print(f"  Contact at step {step}, gripper_action={gripper_action:.2f}")
+
+        if contact_step is not None:
+            # Continue closing until we've tightened by tighten_amount or hit limit
+            target_action = max(contact_action - tighten_amount, -1.0)  # Clamp to actuator limit
+            if gripper_action <= target_action:
+                grasp_action = gripper_action
+                print(f"  Tightened to grasp_action={grasp_action:.2f} (contact was {contact_action:.2f})")
+                break
+    else:
+        # Loop completed without reaching target - use current gripper state
+        if contact_step is not None:
+            grasp_action = -1.0  # Max closed
+            print(f"  Loop ended, using max grip grasp_action={grasp_action:.2f}")
 
     # Step 3: Lift (target finger_mid upward)
-    print("Lifting...")
+    # Allow wrist to flex during lift to maintain grasp
+    print("Lifting (allowing wrist flex)...")
     lift_height = 0.08
     for step in range(500):
         t = min(step / 300, 1.0)
@@ -223,25 +249,37 @@ def run_horizontal_grasp(cube_height=0.06, viewer=None):
         graspframe_target = lift_pos - offset
 
         ctrl = ik.step_toward_target(graspframe_target, gripper_action=grasp_action, gain=0.5)
+        # Don't lock wrist during lift - let IK find stable pose
         data.ctrl[:] = ctrl
         step_sim()
 
-    # Step 4: Hold position
+        if step % 100 == 0:
+            current_cube_z = data.qpos[cube_qpos_addr + 2]
+            wrist = data.qpos[3]
+            print(f"  step {step}: target_z={lift_pos[2]:.3f}, finger_mid_z={finger_mid[2]:.3f}, cube_z={current_cube_z:.3f}, wrist={wrist:.2f}, grasping={is_grasping()}")
+
+    # Step 4: Hold position - track actual cube position
     print("Holding...")
-    hold_pos = actual_cube_pos + np.array([0, 0, lift_height])
     for step in range(500):
+        # Get current cube position and target fingers there
+        current_cube_pos = data.qpos[cube_qpos_addr:cube_qpos_addr+3].copy()
         graspframe_pos = ik.get_ee_position()
         finger_mid = get_fingertip_midpoint()
         offset = finger_mid - graspframe_pos
-        graspframe_target = hold_pos - offset
+        graspframe_target = current_cube_pos - offset
 
         ctrl = ik.step_toward_target(graspframe_target, gripper_action=grasp_action, gain=0.5)
+        # Don't lock wrist - let IK find stable pose
         data.ctrl[:] = ctrl
         step_sim()
 
+        if step % 100 == 0:
+            current_cube_z = data.qpos[cube_qpos_addr + 2]
+            print(f"  step {step}: cube_z={current_cube_z:.3f}, grasping={is_grasping()}")
+
     final_z = data.qpos[cube_qpos_addr + 2]
-    lifted = final_z > cube_z + 0.03
-    print(f"\nCube Z: {final_z:.4f} (started at {cube_z})")
+    lifted = final_z > cube_height + 0.03  # Compare to original cube_height, not overwritten cube_z
+    print(f"\nCube Z: {final_z:.4f} (started at {cube_height})")
     print(f"Result: {'SUCCESS' if lifted else 'FAIL'}")
 
     return lifted
@@ -258,8 +296,7 @@ if __name__ == "__main__":
             while viewer.is_running():
                 time.sleep(0.1)
     else:
-        # Test at different heights
-        print("Testing horizontal grasp at different cube heights:\n")
-        for height in [0.015, 0.03, 0.05, 0.07, 0.09]:
-            success = run_horizontal_grasp(cube_height=height)
-            print()
+        # Test at platform height (0.06 = 45mm platform + 15mm half cube)
+        print("Testing horizontal grasp on platform:\n")
+        success = run_horizontal_grasp(cube_height=0.06)
+        print()

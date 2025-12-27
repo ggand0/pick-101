@@ -346,5 +346,32 @@ if __name__ == "__main__":
         print(f"Static site error: {np.linalg.norm(static_site_world - static_tip_world):.4f}m")
         print(f"Moving site error: {np.linalg.norm(moving_site_world - moving_tip_world):.4f}m")
 
+        # Test midpoint at different gripper openings
+        print("\n=== Midpoint at Different Gripper Openings ===")
+        gripper_range = model.actuator_ctrlrange[5]
+        print(f"Gripper ctrl range: [{gripper_range[0]:.2f}, {gripper_range[1]:.2f}]")
+
+        for gripper_ctrl in [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5]:
+            # Reset to grasp pose
+            data.qpos[1] = 0.5
+            data.qpos[2] = 1.0
+            data.qpos[3] = 1.65
+            data.qpos[4] = np.pi / 2
+            data.ctrl[1] = 0.5
+            data.ctrl[2] = 1.0
+            data.ctrl[3] = 1.65
+            data.ctrl[4] = np.pi / 2
+            data.ctrl[5] = gripper_ctrl
+            for _ in range(200):
+                mujoco.mj_step(model, data)
+
+            static_site = data.site_xpos[static_tip_site_id].copy()
+            moving_site = data.site_xpos[moving_tip_site_id].copy()
+            mid = (static_site + moving_site) / 2
+            gap = np.linalg.norm(static_site - moving_site)
+            gripper_qpos = data.qpos[model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "gripper")]]
+
+            print(f"ctrl={gripper_ctrl:+.1f}: gap={gap:.3f}m, mid_Z={mid[2]:.4f}, gripper_qpos={gripper_qpos:.3f}")
+
     else:
         main()
