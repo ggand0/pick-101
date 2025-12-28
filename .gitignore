@@ -5,9 +5,6 @@ devlogs/
 tmp/
 docs/research/
 runs/
-models/so101/assets/
-*.stl
-*.part
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
