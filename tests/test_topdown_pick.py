@@ -27,6 +27,8 @@ graspframe_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "graspfr
 gripperframe_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
 static_fingertip_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "static_fingertip")
 moving_fingertip_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "moving_fingertip")
+static_pad_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "static_finger_pad")
+moving_pad_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "moving_finger_pad")
 
 
 def get_fingertip_midpoint():
@@ -61,8 +63,8 @@ def get_contacts():
 
 def is_grasping():
     contacts = get_contacts()
-    has_static = any(g in contacts for g in [27, 28])
-    has_moving = any(g in contacts for g in [29, 30])
+    has_static = static_pad_geom_id in contacts
+    has_moving = moving_pad_geom_id in contacts
     return has_static and has_moving
 
 
