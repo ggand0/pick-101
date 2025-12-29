@@ -64,9 +64,14 @@ class LiftCubeCartesianEnv(gym.Env):
         self._reset_gripper_action = None  # Gripper action used at reset (for curriculum)
 
         # Load model
-        scene_path = Path(__file__).parent.parent / "SO-ARM100/Simulation/SO101/lift_cube_scene.xml"
+        scene_path = Path(__file__).parent.parent.parent / "models/so101/lift_cube.xml"
         self.model = mujoco.MjModel.from_xml_path(str(scene_path))
         self.data = mujoco.MjData(self.model)
+
+        # Get finger pad geom IDs for contact detection (new model with finger pads)
+        self._static_pad_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "static_finger_pad")
+        self._moving_pad_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "moving_finger_pad")
+        self._cube_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
 
         # Initialize IK controller with gripperframe (TCP)
         # For grasping, we use offset compensation: target = finger_target + (TCP - finger_mid)
@@ -135,40 +140,30 @@ class LiftCubeCartesianEnv(gym.Env):
         return self.data.qpos[gripper_qpos_addr]
 
     def _check_cube_contacts(self) -> tuple[bool, bool]:
-        """Check if cube contacts static gripper and moving jaw separately.
+        """Check if cube contacts static finger pad and moving finger pad.
 
-        Uses hardcoded geom ID ranges based on XML loading order:
-        - Gripper body geoms: IDs 25-28 (static gripper part)
-        - Moving jaw geoms: IDs 29-30 (moving jaw mesh)
+        Uses named geom lookups for the finger pad collision boxes.
         """
-        cube_geom_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom"
-        )
-        # Gripper body geoms (static part)
-        gripper_geom_ids = set(range(25, 29))
-        # Moving jaw geoms
-        jaw_geom_ids = set(range(29, 31))
-
-        has_gripper_contact = False
-        has_jaw_contact = False
+        has_static_contact = False
+        has_moving_contact = False
 
         for i in range(self.data.ncon):
             geom1 = self.data.contact[i].geom1
             geom2 = self.data.contact[i].geom2
 
             other_geom = None
-            if geom1 == cube_geom_id:
+            if geom1 == self._cube_geom_id:
                 other_geom = geom2
-            elif geom2 == cube_geom_id:
+            elif geom2 == self._cube_geom_id:
                 other_geom = geom1
 
             if other_geom is not None:
-                if other_geom in gripper_geom_ids:
-                    has_gripper_contact = True
-                if other_geom in jaw_geom_ids:
-                    has_jaw_contact = True
+                if other_geom == self._static_pad_geom_id:
+                    has_static_contact = True
+                if other_geom == self._moving_pad_geom_id:
+                    has_moving_contact = True
 
-        return has_gripper_contact, has_jaw_contact
+        return has_static_contact, has_moving_contact
 
     def _is_grasping(self) -> bool:
         """Check if cube is properly grasped (pinched between gripper and jaw)."""
@@ -268,81 +263,102 @@ class LiftCubeCartesianEnv(gym.Env):
     def _reset_with_cube_in_gripper(self, cube_qpos_addr: int, lift_height: float):
         """Reset with cube grasped in gripper at specified height.
 
-        Uses top-down approach with locked wrist joints and contact-based
-        grasp detection for reliable grasping.
+        Exact logic from test_topdown_pick.py pick_up_block().
         """
+        # Constants from test_topdown_pick.py
+        height_offset = 0.03
+        gripper_open = 1.0
+        gripper_closed = -0.8
+        grasp_z_offset = 0.005
+        finger_width_offset = -0.015
+        locked_joints = [3, 4]
+
         # Randomize cube position slightly
         if self.np_random is not None:
-            cube_x = 0.32 + self.np_random.uniform(-0.02, 0.02)
+            cube_x = 0.25 + self.np_random.uniform(-0.02, 0.02)
             cube_y = 0.0 + self.np_random.uniform(-0.02, 0.02)
         else:
-            cube_x, cube_y = 0.32, 0.0
-
+            cube_x, cube_y = 0.25, 0.0
         cube_z = 0.015
 
         # Place cube on table
         self.data.qpos[cube_qpos_addr : cube_qpos_addr + 3] = [cube_x, cube_y, cube_z]
         self.data.qpos[cube_qpos_addr + 3 : cube_qpos_addr + 7] = [1, 0, 0, 0]
 
-        # Pre-rotate wrist for top-down orientation
-        self.data.qpos[4] = np.pi / 2  # wrist_roll = 90 degrees (horizontal fingers)
+        # Top-down arm configuration
+        self.data.qpos[3] = np.pi / 2
+        self.data.qpos[4] = np.pi / 2
+        self.data.ctrl[3] = np.pi / 2
         self.data.ctrl[4] = np.pi / 2
         mujoco.mj_forward(self.model, self.data)
 
-        # Get cube geom ID for contact detection
-        cube_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
+        # Let cube settle
+        for _ in range(50):
+            mujoco.mj_step(self.model, self.data)
 
-        # Step 1: Approach from above - position above cube with fingers open
-        for _ in range(400):
-            target = np.array([cube_x, cube_y, cube_z + 0.05])
-            ctrl = self.ik.step_toward_target(target, gripper_action=1.0, gain=0.5, locked_joints=[3, 4])
-            ctrl[3] = 1.65  # wrist_flex points down
+        # Read actual cube position after settle
+        actual_cube_pos = self.data.qpos[cube_qpos_addr : cube_qpos_addr + 3].copy()
+
+        # Step 1: Move above block with gripper open
+        above_pos = actual_cube_pos.copy()
+        above_pos[2] += grasp_z_offset + height_offset
+        above_pos[1] += finger_width_offset
+        for _ in range(300):
+            ctrl = self.ik.step_toward_target(above_pos, gripper_action=gripper_open, gain=0.5, locked_joints=locked_joints)
+            self.data.ctrl[:] = ctrl
+            mujoco.mj_step(self.model, self.data)
+
+        # Step 2: Move down to block with gripper open
+        grasp_target = actual_cube_pos.copy()
+        grasp_target[2] += grasp_z_offset
+        grasp_target[1] += finger_width_offset
+        for _ in range(200):
+            ctrl = self.ik.step_toward_target(grasp_target, gripper_action=gripper_open, gain=0.5, locked_joints=locked_joints)
+            self.data.ctrl[:] = ctrl
+            mujoco.mj_step(self.model, self.data)
+
+        # Step 3: Close gripper with contact detection
+        contact_step = None
+        contact_action = None
+        tighten_amount = 0.4
+        grasp_action = gripper_closed
+
+        for step in range(300):
+            if contact_step is None:
+                t = min(step / 250, 1.0)
+                gripper = gripper_open - 2.0 * t
+            else:
+                steps_since = step - contact_step
+                t_slow = min(steps_since / 100, 1.0)
+                target_action = max(contact_action - tighten_amount, -1.0)
+                gripper = contact_action + (target_action - contact_action) * t_slow
+
+            ctrl = self.ik.step_toward_target(grasp_target, gripper_action=gripper, gain=0.5, locked_joints=locked_joints)
+            ctrl[3] = np.pi / 2
             ctrl[4] = np.pi / 2
             self.data.ctrl[:] = ctrl
             mujoco.mj_step(self.model, self.data)
 
-        # Step 2: Descend to cube level - fingers straddle cube
-        for _ in range(400):
-            target = np.array([cube_x, cube_y, cube_z])
-            ctrl = self.ik.step_toward_target(target, gripper_action=1.0, gain=0.5, locked_joints=[3, 4])
-            ctrl[3] = 1.65
-            ctrl[4] = np.pi / 2
-            self.data.ctrl[:] = ctrl
-            mujoco.mj_step(self.model, self.data)
+            # Detect contact using is_grasping logic
+            if self._is_grasping() and contact_step is None:
+                contact_step = step
+                contact_action = gripper
 
-        # Step 3: Close gripper until both fingers contact cube
-        grasp_gripper_action = 1.0
-        for step in range(800):
-            contacts = self._get_cube_contacts(cube_geom_id)
-            has_27_28 = 27 in contacts or 28 in contacts
-            has_29_30 = 29 in contacts or 30 in contacts
+            # Check if done tightening
+            if contact_step is not None:
+                target_action = max(contact_action - tighten_amount, -1.0)
+                if gripper <= target_action + 0.01:
+                    grasp_action = gripper
+                    break
 
-            # Ramp gripper closed
-            t = min(step / 600, 1.0)
-            gripper_action = 1.0 - 2.0 * t
-
-            target = np.array([cube_x, cube_y, cube_z])
-            ctrl = self.ik.step_toward_target(target, gripper_action=gripper_action, gain=0.5, locked_joints=[3, 4])
-            ctrl[3] = 1.65
-            ctrl[4] = np.pi / 2
-            self.data.ctrl[:] = ctrl
-            mujoco.mj_step(self.model, self.data)
-
-            # Stop when grasp achieved and gripper is closed enough
-            if has_27_28 and has_29_30 and self._get_gripper_state() < 0.25:
-                grasp_gripper_action = gripper_action
-                break
+        # Handle case where loop finished without breaking
+        if contact_step is not None and gripper > max(contact_action - tighten_amount, -1.0) + 0.01:
+            grasp_action = gripper
 
         # Store the gripper action for curriculum learning
-        self._reset_gripper_action = grasp_gripper_action
+        self._reset_gripper_action = grasp_action
 
-        # Step 4: Settle - maintain the exact gripper action that achieved grasp
-        for _ in range(50):
-            ctrl = self.ik.step_toward_target(target, gripper_action=grasp_gripper_action, gain=0.5, locked_joints=[3, 4])
-            ctrl[3] = 1.65
-            ctrl[4] = np.pi / 2
-            self.data.ctrl[:] = ctrl
-            mujoco.mj_step(self.model, self.data)
+        # Agent starts here with cube grasped - needs to learn to lift
 
     def _reset_gripper_near_cube(self, cube_qpos_addr: int):
         """Reset with gripper positioned near cube but open."""
