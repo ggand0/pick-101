@@ -99,7 +99,7 @@ def pick_up_block(cube_pos, viewer=None):
     Adapted from ECE4560 SO-101 assignment.
     """
     height_offset = 0.03  # 30mm above block
-    gripper_open = 1.0    # fully open
+    gripper_open = 0.3    # partially open (ECE4560 uses 50/100, not fully open)
     gripper_closed = -0.8  # tighter grip
 
     # Cube is ~30mm tall, center at ~15mm from ground

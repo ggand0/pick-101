@@ -267,7 +267,7 @@ class LiftCubeCartesianEnv(gym.Env):
         """
         # Constants from test_topdown_pick.py
         height_offset = 0.03
-        gripper_open = 1.0
+        gripper_open = 0.3  # partially open (ECE4560 uses 50/100, not fully open)
         gripper_closed = -0.8
         grasp_z_offset = 0.005
         finger_width_offset = -0.015
