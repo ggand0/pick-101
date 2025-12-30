@@ -42,6 +42,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/lift_500k.yaml")
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--pretrained", type=str, default=None,
+                        help="Path to pretrained model .zip file (transfer learning)")
     parser.add_argument("--timesteps", type=int, default=None,
                         help="Override timesteps from config (useful for resuming)")
     args = parser.parse_args()
@@ -79,18 +81,28 @@ def main():
             f.write(f"Resumed from: {resume_dir}\n")
             f.write(f"Timestamp: {timestamp}\n")
 
+    # Determine if we need to load VecNormalize from a previous run
+    pretrained = args.pretrained or train_cfg.get("pretrained")
+    vec_normalize_path = None
+    if args.resume:
+        vec_normalize_path = resume_dir / "vec_normalize.pkl"
+    elif pretrained:
+        # For pretrained, find vec_normalize.pkl in the run directory
+        # pretrained path is like: runs/.../checkpoints/model.zip
+        pretrained_path = Path(pretrained)
+        pretrained_run_dir = pretrained_path.parent.parent
+        vec_normalize_path = pretrained_run_dir / "vec_normalize.pkl"
+
     # Create environments
     env = DummyVecEnv([lambda: make_env(env_cfg)])
 
-    # Load normalization stats from resume directory if resuming
-    if args.resume:
-        resume_vec_normalize_path = resume_dir / "vec_normalize.pkl"
-        if resume_vec_normalize_path.exists():
-            env = VecNormalize.load(resume_vec_normalize_path, env)
-            env.training = True
-            print(f"Loaded normalization stats from {resume_vec_normalize_path}")
-        else:
-            raise ValueError(f"vec_normalize.pkl not found in {resume_dir}")
+    # Load normalization stats if available
+    if vec_normalize_path and vec_normalize_path.exists():
+        env = VecNormalize.load(vec_normalize_path, env)
+        env.training = True  # Continue updating stats during training
+        print(f"Loaded normalization stats from {vec_normalize_path}")
+    elif vec_normalize_path:
+        raise ValueError(f"vec_normalize.pkl not found: {vec_normalize_path}")
     else:
         env = VecNormalize(
             env,
@@ -99,9 +111,8 @@ def main():
         )
 
     eval_env = DummyVecEnv([lambda: make_env(env_cfg)])
-    if args.resume:
-        # Load same normalization stats for eval (but with training=False)
-        eval_env = VecNormalize.load(resume_vec_normalize_path, eval_env)
+    if vec_normalize_path and vec_normalize_path.exists():
+        eval_env = VecNormalize.load(vec_normalize_path, eval_env)
         eval_env.training = False
         eval_env.norm_reward = False
     else:
@@ -138,6 +149,23 @@ def main():
                 f.write(f"Resume step: {resume_step}\n")
         else:
             raise ValueError(f"No checkpoints found in {resume_dir / 'checkpoints'}")
+    elif pretrained:
+        # Transfer learning: load pretrained weights but start fresh training
+        pretrained_path = Path(pretrained)
+        if not pretrained_path.exists():
+            raise ValueError(f"Pretrained model not found: {pretrained_path}")
+        model = SAC.load(pretrained_path, env=env, device=device)
+        model.tensorboard_log = str(output_dir / "tensorboard")
+        # Reset timestep counter for fresh training
+        model.num_timesteps = 0
+        model._episode_num = 0
+        # Clear replay buffer for fresh experience
+        model.replay_buffer.reset()
+        print(f"Loaded pretrained weights from {pretrained_path}")
+        # Document transfer learning
+        with open(output_dir / "PRETRAINED_INFO.txt", "w") as f:
+            f.write(f"Pretrained from: {pretrained_path}\n")
+            f.write(f"Timestamp: {timestamp}\n")
     else:
         model = SAC(
             "MlpPolicy",
