@@ -363,23 +363,54 @@ class LiftCubeCartesianEnv(gym.Env):
         # Agent starts here with cube grasped - needs to learn to lift
 
     def _reset_gripper_near_cube(self, cube_qpos_addr: int):
-        """Reset with gripper positioned near cube but open."""
-        # Randomize cube position
+        """Reset with gripper positioned above cube, open, ready to grasp.
+
+        Uses same top-down setup as stage 1/2 but with gripper open and
+        positioned slightly above grasp height.
+        """
+        # Constants from test_topdown_pick.py
+        height_offset = 0.03
+        gripper_open = 0.3  # partially open
+        grasp_z_offset = 0.005
+        finger_width_offset = -0.015
+
+        # Randomize cube position (same range as stage 1)
         if self.np_random is not None:
-            cube_x = 0.40 + self.np_random.uniform(-0.02, 0.02)
-            cube_y = -0.10 + self.np_random.uniform(-0.02, 0.02)
+            cube_x = 0.25 + self.np_random.uniform(-0.02, 0.02)
+            cube_y = 0.0 + self.np_random.uniform(-0.02, 0.02)
         else:
-            cube_x, cube_y = 0.40, -0.10
+            cube_x, cube_y = 0.25, 0.0
+        cube_z = 0.015
 
         # Place cube on table
-        self.data.qpos[cube_qpos_addr : cube_qpos_addr + 3] = [cube_x, cube_y, 0.01]
+        self.data.qpos[cube_qpos_addr : cube_qpos_addr + 3] = [cube_x, cube_y, cube_z]
         self.data.qpos[cube_qpos_addr + 3 : cube_qpos_addr + 7] = [1, 0, 0, 0]
 
-        # Position gripper just above cube with gripper open
-        target_pos = np.array([cube_x, cube_y, 0.04])  # 3cm above cube
+        # Top-down arm configuration (wrist locked)
+        self.data.qpos[3] = np.pi / 2
+        self.data.qpos[4] = np.pi / 2
+        self.data.ctrl[3] = np.pi / 2
+        self.data.ctrl[4] = np.pi / 2
+        mujoco.mj_forward(self.model, self.data)
 
+        # Let cube settle
+        for _ in range(50):
+            mujoco.mj_step(self.model, self.data)
+
+        # Read actual cube position after settle
+        actual_cube_pos = self.data.qpos[cube_qpos_addr : cube_qpos_addr + 3].copy()
+
+        # Position gripper above cube (above grasp height, so agent needs to lower)
+        above_pos = actual_cube_pos.copy()
+        above_pos[1] += finger_width_offset
+        above_pos[2] = actual_cube_pos[2] + grasp_z_offset + height_offset  # Above grasp height
+
+        # Move to above position with gripper open
+        locked_joints = [3, 4] if self.lock_wrist else []
         for _ in range(100):
-            ctrl = self.ik.step_toward_target(target_pos, gripper_action=1.0, gain=0.5)  # Open
+            ctrl = self.ik.step_toward_target(
+                above_pos, gripper_action=gripper_open, gain=0.5, locked_joints=locked_joints
+            )
             self.data.ctrl[:] = ctrl
             mujoco.mj_step(self.model, self.data)
 
