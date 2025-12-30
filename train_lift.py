@@ -25,6 +25,11 @@ def load_config(config_path: str) -> dict:
 
 
 def make_env(env_cfg: dict):
+    # Parse place_target if provided (can be list or tuple in yaml)
+    place_target = env_cfg.get("place_target")
+    if place_target is not None:
+        place_target = tuple(place_target)
+
     return LiftCubeCartesianEnv(
         render_mode=None,
         max_episode_steps=env_cfg.get("max_episode_steps", 200),
@@ -35,6 +40,7 @@ def make_env(env_cfg: dict):
         reward_version=env_cfg.get("reward_version", "v7"),
         curriculum_stage=env_cfg.get("curriculum_stage", 0),
         lock_wrist=env_cfg.get("lock_wrist", False),
+        place_target=place_target,
     )
 
 

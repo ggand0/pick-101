@@ -46,6 +46,7 @@ class LiftCubeCartesianEnv(gym.Env):
         reward_version: str = "v7",
         curriculum_stage: int = 0,  # 0=normal, 1=cube in gripper lifted, 2=cube in gripper on table, 3=gripper near cube
         lock_wrist: bool = False,  # Lock wrist joints for stable grasping
+        place_target: tuple[float, float] | None = None,  # (x, y) target for placement
     ):
         super().__init__()
 
@@ -58,11 +59,13 @@ class LiftCubeCartesianEnv(gym.Env):
         self.reward_version = reward_version
         self.curriculum_stage = curriculum_stage
         self.lock_wrist = lock_wrist
+        self.place_target = place_target
         self._step_count = 0
         self._hold_count = 0
         self._was_grasping = False  # Track if we had grasp in previous step (for drop penalty)
         self._reset_gripper_action = None  # Gripper action used at reset (for curriculum)
         self._prev_action = np.zeros(4)  # Track previous action for smoothness penalty
+        self._place_target_pos = None  # Full 3D target position (set at reset)
 
         # Load model
         scene_path = Path(__file__).parent.parent.parent / "models/so101/lift_cube.xml"
@@ -88,7 +91,11 @@ class LiftCubeCartesianEnv(gym.Env):
         )
 
         # Observation space
-        obs_dim = 6 + 6 + 3 + 3 + 3  # joints pos/vel + gripper pos + gripper euler + cube pos
+        # Base: joints pos/vel + gripper pos + gripper euler + cube pos
+        # With place_target: add target pos (3)
+        obs_dim = 6 + 6 + 3 + 3 + 3
+        if self.place_target is not None:
+            obs_dim += 3  # Add target position
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -112,9 +119,13 @@ class LiftCubeCartesianEnv(gym.Env):
 
         cube_pos = self.data.sensor("cube_pos").data.copy()
 
-        return np.concatenate([
-            joint_pos, joint_vel, gripper_pos, gripper_euler, cube_pos
-        ]).astype(np.float32)
+        obs_parts = [joint_pos, joint_vel, gripper_pos, gripper_euler, cube_pos]
+
+        # Include target position if place task
+        if self._place_target_pos is not None:
+            obs_parts.append(self._place_target_pos)
+
+        return np.concatenate(obs_parts).astype(np.float32)
 
     @staticmethod
     def _rotation_matrix_to_euler(R: np.ndarray) -> np.ndarray:
@@ -187,7 +198,8 @@ class LiftCubeCartesianEnv(gym.Env):
         is_lifted = is_grasping and cube_z > self.lift_height
 
         has_gripper_contact, has_jaw_contact = self._check_cube_contacts()
-        return {
+
+        info = {
             "gripper_to_cube": gripper_to_cube,
             "cube_pos": cube_pos.copy(),
             "cube_z": cube_z,
@@ -200,6 +212,20 @@ class LiftCubeCartesianEnv(gym.Env):
             "hold_count": self._hold_count,
             "is_success": self._hold_count >= self.hold_steps,
         }
+
+        # Add place-related info if place target is set
+        if self._place_target_pos is not None:
+            cube_to_target_xy = np.linalg.norm(cube_pos[:2] - self._place_target_pos[:2])
+            cube_at_target = cube_to_target_xy < 0.02  # Within 2cm of target
+            cube_on_ground = cube_z < 0.025  # Cube resting on table
+            is_placed = cube_at_target and cube_on_ground and not is_grasping
+            info["cube_to_target"] = cube_to_target_xy
+            info["place_target"] = self._place_target_pos.copy()
+            info["is_placed"] = is_placed
+            # Override success for place task
+            info["is_success"] = is_placed
+
+        return info
 
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
@@ -234,10 +260,26 @@ class LiftCubeCartesianEnv(gym.Env):
             # Stage 3: Gripper near cube, open (need to close and lift)
             self._reset_gripper_near_cube(cube_qpos_addr)
 
+        elif self.curriculum_stage == 4:
+            # Stage 4: Gripper far from cube (need to reach, descend, grasp, lift)
+            self._reset_gripper_far_from_cube(cube_qpos_addr)
+
         mujoco.mj_forward(self.model, self.data)
 
         # Initialize target EE position to current position
         self._target_ee_pos = self.ik.get_ee_position().copy()
+
+        # Initialize place target if set
+        if self.place_target is not None:
+            # Add small randomization to place target
+            if self.np_random is not None:
+                target_x = self.place_target[0] + self.np_random.uniform(-0.01, 0.01)
+                target_y = self.place_target[1] + self.np_random.uniform(-0.01, 0.01)
+            else:
+                target_x, target_y = self.place_target
+            self._place_target_pos = np.array([target_x, target_y, 0.015])  # z = cube resting height
+        else:
+            self._place_target_pos = None
 
         self._step_count = 0
         self._hold_count = 0
@@ -414,6 +456,69 @@ class LiftCubeCartesianEnv(gym.Env):
             self.data.ctrl[:] = ctrl
             mujoco.mj_step(self.model, self.data)
 
+    def _reset_gripper_far_from_cube(self, cube_qpos_addr: int):
+        """Reset with gripper positioned further from cube - must reach first.
+
+        Stage 4: Gripper starts ~8-12cm away from cube in XY plane,
+        at lift height. Agent must reach, descend, grasp, and lift.
+        """
+        gripper_open = 0.3
+
+        # Randomize cube position
+        if self.np_random is not None:
+            cube_x = 0.25 + self.np_random.uniform(-0.02, 0.02)
+            cube_y = 0.0 + self.np_random.uniform(-0.02, 0.02)
+        else:
+            cube_x, cube_y = 0.25, 0.0
+        cube_z = 0.015
+
+        # Place cube on table
+        self.data.qpos[cube_qpos_addr : cube_qpos_addr + 3] = [cube_x, cube_y, cube_z]
+        self.data.qpos[cube_qpos_addr + 3 : cube_qpos_addr + 7] = [1, 0, 0, 0]
+
+        # Top-down arm configuration (wrist locked)
+        self.data.qpos[3] = np.pi / 2
+        self.data.qpos[4] = np.pi / 2
+        self.data.ctrl[3] = np.pi / 2
+        self.data.ctrl[4] = np.pi / 2
+        mujoco.mj_forward(self.model, self.data)
+
+        # Let cube settle
+        for _ in range(50):
+            mujoco.mj_step(self.model, self.data)
+
+        # Read actual cube position after settle
+        actual_cube_pos = self.data.qpos[cube_qpos_addr : cube_qpos_addr + 3].copy()
+
+        # Position gripper at a distance from cube
+        # Random offset in XY: 8-12cm away, random direction
+        if self.np_random is not None:
+            angle = self.np_random.uniform(0, 2 * np.pi)
+            distance = self.np_random.uniform(0.08, 0.12)
+            offset_x = distance * np.cos(angle)
+            offset_y = distance * np.sin(angle)
+        else:
+            offset_x, offset_y = 0.10, 0.0
+
+        start_pos = np.array([
+            actual_cube_pos[0] + offset_x,
+            actual_cube_pos[1] + offset_y,
+            self.lift_height + 0.02  # Start at lift height
+        ])
+
+        # Clamp to workspace bounds
+        start_pos[0] = np.clip(start_pos[0], 0.15, 0.45)
+        start_pos[1] = np.clip(start_pos[1], -0.25, 0.25)
+
+        # Move to start position with gripper open
+        locked_joints = [3, 4] if self.lock_wrist else []
+        for _ in range(150):
+            ctrl = self.ik.step_toward_target(
+                start_pos, gripper_action=gripper_open, gain=0.5, locked_joints=locked_joints
+            )
+            self.data.ctrl[:] = ctrl
+            mujoco.mj_step(self.model, self.data)
+
     def step(
         self, action: np.ndarray
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
@@ -431,8 +536,17 @@ class LiftCubeCartesianEnv(gym.Env):
         self._target_ee_pos[2] = np.clip(self._target_ee_pos[2], 0.01, 0.4)
 
         # Use IK to compute joint controls
-        if self.lock_wrist:
-            # Lock gripper to reset value - agent only controls XYZ for lifting
+        if self.place_target is not None:
+            # Place task: agent controls gripper (to release), but wrist stays locked
+            ctrl = self.ik.step_toward_target(
+                self._target_ee_pos,
+                gripper_action=gripper_action,
+                gain=0.5,
+                locked_joints=[4],
+            )
+            ctrl[4] = np.pi / 2  # wrist_roll horizontal
+        elif self.lock_wrist:
+            # Lift task: lock gripper to reset value - agent only controls XYZ
             # This prevents physics issues (can't open with cube in grip, closing launches cube)
             if self._reset_gripper_action is not None:
                 stable_gripper = self._reset_gripper_action
@@ -466,15 +580,20 @@ class LiftCubeCartesianEnv(gym.Env):
         obs = self._get_obs()
         info = self._get_info()
 
-        # Update hold counter
+        # Update hold counter (for lift task)
         if info["is_lifted"]:
             self._hold_count += 1
         else:
             self._hold_count = 0
         info["hold_count"] = self._hold_count
 
-        # Check success
-        is_success = self._hold_count >= self.hold_steps
+        # Check success (depends on task type)
+        if self._place_target_pos is not None:
+            # Place task: success is determined by is_placed (set in _get_info)
+            is_success = info.get("is_placed", False)
+        else:
+            # Lift task: success after holding for hold_steps
+            is_success = self._hold_count >= self.hold_steps
         info["is_success"] = is_success
 
         # Compute reward (pass previous grasp state for drop penalty)
@@ -876,6 +995,87 @@ class LiftCubeCartesianEnv(gym.Env):
 
         # Success bonus
         if info["is_success"]:
+            reward += 10.0
+
+        return reward
+
+    def _reward_v12(self, info: dict[str, Any], was_grasping: bool = False, action: np.ndarray | None = None) -> float:
+        """V12: Pick-and-place reward. Extends v11 with transport and placement rewards.
+
+        Phases:
+        1. Reach and grasp (same as v11)
+        2. Lift (same as v11)
+        3. Transport to target (reward for moving cube toward target)
+        4. Lower and release (reward for placing at target)
+        """
+        reward = 0.0
+        cube_pos = info["cube_pos"]
+        cube_z = info["cube_z"]
+        gripper_to_cube = info["gripper_to_cube"]
+        is_grasping = info["is_grasping"]
+
+        # Phase 1: Reach reward
+        reach_reward = 1.0 - np.tanh(10.0 * gripper_to_cube)
+        reward += reach_reward
+
+        # Push-down penalty
+        if cube_z < 0.01:
+            push_penalty = (0.01 - cube_z) * 50.0
+            reward -= push_penalty
+
+        # Drop penalty (only during transport, not during intentional release)
+        cube_to_target = info.get("cube_to_target", 0)
+        if was_grasping and not is_grasping and cube_to_target > 0.03:
+            reward -= 2.0  # Penalty for dropping away from target
+
+        # Phase 2: Grasp and lift rewards
+        if is_grasping:
+            reward += 0.25
+
+            # Continuous lift reward when grasping
+            lift_progress = max(0, cube_z - 0.015) / (self.lift_height - 0.015)
+            reward += lift_progress * 2.0
+
+        # Binary lift bonus
+        if cube_z > 0.02:
+            reward += 1.0
+
+        # Target height bonus
+        if cube_z > self.lift_height:
+            reward += 1.0
+
+        # Phase 3: Transport reward (move cube toward target while lifted)
+        if self._place_target_pos is not None:
+            target_xy = self._place_target_pos[:2]
+            cube_xy = cube_pos[:2]
+
+            # Reward for cube being close to target (XY only)
+            transport_reward = 1.0 - np.tanh(5.0 * cube_to_target)
+            reward += transport_reward
+
+            # Bonus for reaching target zone while grasping and lifted
+            if cube_to_target < 0.03 and is_grasping and cube_z > self.lift_height:
+                reward += 2.0  # At target, ready to place
+
+            # Phase 4: Placement reward
+            if cube_to_target < 0.03:
+                # Reward for lowering cube at target
+                if cube_z < self.lift_height:
+                    lower_progress = (self.lift_height - cube_z) / (self.lift_height - 0.015)
+                    reward += lower_progress * 1.0
+
+                # Reward for releasing at target (gripper opening)
+                if not is_grasping and cube_z < 0.025:
+                    reward += 3.0  # Just released at target
+
+        # Action rate penalty for smoothness (only when lifted)
+        if action is not None and cube_z > 0.06:
+            action_delta = action - self._prev_action
+            action_penalty = 0.01 * np.sum(action_delta**2)
+            reward -= action_penalty
+
+        # Success bonus
+        if info.get("is_placed", False):
             reward += 10.0
 
         return reward
