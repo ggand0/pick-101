@@ -39,7 +39,7 @@ num_eval_episodes: 10
 
 # Checkpointing
 save_snapshot: true
-snapshot_every_n: 50000  # Save every 50k steps
+snapshot_every_n: 6250  # Save every ~50k steps (6250 iters * 8 envs)
 
 # Replay buffer
 replay:
@@ -65,3 +65,6 @@ hydra:
 
 # Misc
 seed: 1
+
+# Resume from checkpoint (set via command line)
+resume_from: null
