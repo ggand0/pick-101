@@ -21,6 +21,17 @@ from robobase.envs.wrappers import (
 from src.envs.lift_cube import LiftCubeCartesianEnv
 
 
+class SuccessInfoWrapper(gym.Wrapper):
+    """Wrapper that copies is_success to task_success for RoboBase compatibility."""
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        # RoboBase looks for 'task_success', our env returns 'is_success'
+        if "is_success" in info:
+            info["task_success"] = float(info["is_success"])
+        return obs, reward, terminated, truncated, info
+
+
 class WristCameraWrapper(gym.ObservationWrapper):
     """Adds wrist camera image to observation dict for RoboBase."""
 
@@ -92,6 +103,9 @@ class SO101Factory(EnvFactory):
 
     def _wrap_env(self, env: gym.Env, cfg: DictConfig) -> gym.Env:
         """Apply standard RoboBase wrappers."""
+        # Add success info conversion for RoboBase
+        env = SuccessInfoWrapper(env)
+
         # Rescale actions from [-1, 1] tanh output
         env = RescaleFromTanh(env)
 
