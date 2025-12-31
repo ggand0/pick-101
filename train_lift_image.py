@@ -2,22 +2,47 @@
 
 Uses wrist camera observations instead of state for sim-to-real transfer.
 Provides familiar SB3-style logging with tqdm progress bar.
+
+Resume training:
+    python train_lift_image.py --resume runs/lift_image/20231231_120000
 """
 import argparse
+import pickle
 import shutil
 from datetime import datetime
 from pathlib import Path
 
 import torch
 import yaml
-from gymnasium.wrappers import FrameStack
 from stable_baselines3 import SAC
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
 
 from src.callbacks.plot_callback import PlotLearningCurveCallback
 from src.envs.lift_cube import LiftCubeCartesianEnv
 from src.envs.wrappers.image_obs import ImageObsWrapper
+
+
+class ReplayBufferCheckpointCallback(BaseCallback):
+    """Save replay buffer alongside model checkpoints."""
+
+    def __init__(self, save_path: str, save_freq: int, verbose: int = 0):
+        super().__init__(verbose)
+        self.save_path = Path(save_path)
+        self.save_freq = save_freq
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq == 0:
+            replay_path = self.save_path / f"replay_buffer_{self.num_timesteps}.pkl"
+            with open(replay_path, "wb") as f:
+                pickle.dump(self.model.replay_buffer, f)
+            if self.verbose > 0:
+                print(f"Saved replay buffer to {replay_path}")
+            # Keep only latest replay buffer to save disk space
+            for old_file in self.save_path.glob("replay_buffer_*.pkl"):
+                if old_file != replay_path:
+                    old_file.unlink()
+        return True
 
 
 def load_config(config_path: str) -> dict:
@@ -75,19 +100,15 @@ def main():
         resume_dir = Path(args.resume)
         if not resume_dir.exists():
             raise ValueError(f"Resume directory not found: {resume_dir}")
-        output_dir = Path(exp_cfg["base_dir"]) / exp_cfg["name"] / f"{timestamp}_resumed"
+        # Continue in the SAME directory for seamless resume
+        output_dir = resume_dir
+        print(f"Resuming in existing directory: {output_dir}")
     else:
         resume_dir = None
         output_dir = Path(exp_cfg["base_dir"]) / exp_cfg["name"] / timestamp
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Copy config
-    shutil.copy(args.config, output_dir / "config.yaml")
-
-    if args.resume:
-        with open(output_dir / "RESUME_INFO.txt", "w") as f:
-            f.write(f"Resumed from: {resume_dir}\n")
-            f.write(f"Timestamp: {timestamp}\n")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Copy config only for new runs
+        shutil.copy(args.config, output_dir / "config.yaml")
 
     # Create vectorized environments with image observations
     env = DummyVecEnv([lambda: make_env(env_cfg, image_cfg)])
@@ -103,7 +124,7 @@ def main():
     # Create or load model
     resume_step = 0
     if args.resume:
-        checkpoints = list((resume_dir / "checkpoints").glob("*.zip"))
+        checkpoints = list((output_dir / "checkpoints").glob("*.zip"))
         def get_step_number(path):
             name = path.stem
             parts = name.split("_")
@@ -118,11 +139,19 @@ def main():
             model = SAC.load(latest_checkpoint, env=env, device=device)
             model.tensorboard_log = str(output_dir / "tensorboard")
             print(f"Resumed from {latest_checkpoint} (step {resume_step})")
-            with open(output_dir / "RESUME_INFO.txt", "a") as f:
-                f.write(f"Checkpoint: {latest_checkpoint}\n")
-                f.write(f"Resume step: {resume_step}\n")
+
+            # Try to load replay buffer if available
+            replay_files = list((output_dir / "checkpoints").glob("replay_buffer_*.pkl"))
+            if replay_files:
+                latest_replay = max(replay_files, key=lambda p: get_step_number(p))
+                print(f"Loading replay buffer from {latest_replay}...")
+                with open(latest_replay, "rb") as f:
+                    model.replay_buffer = pickle.load(f)
+                print(f"Loaded {model.replay_buffer.size()} transitions")
+            else:
+                print("No replay buffer found, starting fresh (will refill during training)")
         else:
-            raise ValueError(f"No checkpoints found in {resume_dir / 'checkpoints'}")
+            raise ValueError(f"No checkpoints found in {output_dir / 'checkpoints'}")
     else:
         # CNN policy for image observations
         policy_kwargs = dict(
@@ -151,10 +180,17 @@ def main():
         )
 
     # Callbacks
+    save_freq = train_cfg.get("save_freq", 50000)
     checkpoint_callback = CheckpointCallback(
-        save_freq=train_cfg.get("save_freq", 50000),
+        save_freq=save_freq,
         save_path=str(output_dir / "checkpoints"),
         name_prefix="sac_image",
+    )
+
+    replay_buffer_callback = ReplayBufferCheckpointCallback(
+        save_path=str(output_dir / "checkpoints"),
+        save_freq=save_freq,
+        verbose=1,
     )
 
     eval_callback = EvalCallback(
@@ -168,7 +204,7 @@ def main():
 
     plot_callback = PlotLearningCurveCallback(
         run_dir=output_dir,
-        save_freq=train_cfg.get("save_freq", 50000),
+        save_freq=save_freq,
         verbose=1,
         resume_step=resume_step,
     )
@@ -195,7 +231,7 @@ def main():
 
     model.learn(
         total_timesteps=learn_timesteps,
-        callback=[checkpoint_callback, eval_callback, plot_callback],
+        callback=[checkpoint_callback, replay_buffer_callback, eval_callback, plot_callback],
         progress_bar=True,
         reset_num_timesteps=reset_num_timesteps,
     )
