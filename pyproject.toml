@@ -21,9 +21,11 @@ dependencies = [
     "omegaconf>=2.3.0",
     "wandb>=0.15.0",
     "numpy<2.0.0",
+    "robobase",
 ]
 
 [tool.uv.sources]
+robobase = { path = "external/robobase", editable = true }
 torch = [
     { index = "pytorch-rocm" },
 ]

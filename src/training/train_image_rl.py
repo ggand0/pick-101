@@ -16,12 +16,8 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-# Patch logger BEFORE importing robobase.workspace
-from src.training.sb3_style_logger import patch_robobase_logger
-patch_robobase_logger()
-
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from robobase.workspace import Workspace
 
