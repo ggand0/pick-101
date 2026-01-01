@@ -33,7 +33,7 @@ method:
     mlp_nodes: [256, 256]
 
 # Training settings
-num_train_frames: 1000000
+num_train_frames: 2000000
 eval_every_steps: 10000
 num_eval_episodes: 10
 

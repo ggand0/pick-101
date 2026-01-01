@@ -112,11 +112,11 @@
                 <!-- Frame graspframe (midpoint between fingers, for RL reach reward) -->
                 <site group="3" name="graspframe" pos="0.002338 0.000055 -0.037843" quat="0.707107 -0 0.707107 -2.37788e-17"/>
                 <!-- Wrist camera (matches real SO-101 32x32 UVC module mount) -->
-                <!-- Position: centered between fingers (X~0), high above gripper (+Y), behind graspframe (+Z) -->
-                <!-- Real camera is on bracket between the two fingers, looking forward -->
-                <camera name="wrist_cam" pos="0.0 0.055 0.02" euler="0 0 0" fovy="75"/>
+                <!-- Position: centered between fingers (X~0), on front side (-Y), behind graspframe (+Z) -->
+                <!-- Real camera is on bracket on front side of gripper, looking toward fingertips -->
+                <camera name="wrist_cam" pos="0.0 -0.055 0.02" euler="0 0 3.14159" fovy="75"/>
                 <!-- Camera position marker (red sphere for visualization) -->
-                <site name="wrist_cam_marker" pos="0.0 0.055 0.02" size="0.008" rgba="1 0 0 1"/>
+                <site name="wrist_cam_marker" pos="0.0 -0.055 0.02" size="0.008" rgba="1 0 0 1"/>
                 <!-- Static fingertip (max mesh-local Z vertices) -->
                 <site group="3" name="static_fingertip" pos="-0.012 0.0 -0.104" rgba="1 0 0 1" size="0.005"/>
                 <!-- Static finger collision pad (box for stable contact) -->

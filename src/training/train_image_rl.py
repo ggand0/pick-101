@@ -19,8 +19,7 @@ sys.path.insert(0, str(project_root))
 import hydra
 from omegaconf import DictConfig
 
-from robobase.workspace import Workspace
-
+from src.training.workspace import SO101Workspace
 from src.training.so101_factory import SO101Factory
 
 
@@ -37,7 +36,7 @@ ROBOBASE_CFG_PATH = str(Path(robobase.__file__).parent / "cfgs")
 def main(cfg: DictConfig):
     """Train image-based RL agent."""
     # Create workspace with SO-101 factory
-    workspace = Workspace(cfg, env_factory=SO101Factory())
+    workspace = SO101Workspace(cfg, env_factory=SO101Factory())
 
     # Check for resume
     resume_from = cfg.get("resume_from", None)
