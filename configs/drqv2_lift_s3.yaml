@@ -9,7 +9,7 @@ env:
   episode_length: 200
   image_size: 84
   curriculum_stage: 3  # 0=normal, 1=lifted, 2=table grasp, 3=near cube, 4=far
-  reward_version: v13
+  reward_version: v14
   lock_wrist: false
   stddev_schedule: "linear(1.0,0.1,500000)"
 
