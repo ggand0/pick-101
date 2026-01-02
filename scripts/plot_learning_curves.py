@@ -29,6 +29,44 @@ def load_tb_data(log_dir: Path) -> dict:
     return data
 
 
+def split_runs(steps: np.ndarray, values: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Split data into separate runs based on step discontinuities.
+
+    Detects when steps decrease or have large gaps, indicating a new run started.
+    """
+    if len(steps) == 0:
+        return []
+
+    runs = []
+    run_start = 0
+
+    for i in range(1, len(steps)):
+        # Detect run boundary: step decreased or large gap (>2x previous delta)
+        if steps[i] < steps[i-1]:
+            # New run started (step reset)
+            runs.append((steps[run_start:i], values[run_start:i]))
+            run_start = i
+
+    # Add final run
+    if run_start < len(steps):
+        runs.append((steps[run_start:], values[run_start:]))
+
+    return runs
+
+
+# Color palette for different runs
+RUN_COLORS = [
+    '#1f77b4',  # blue
+    '#ff7f0e',  # orange
+    '#2ca02c',  # green
+    '#d62728',  # red
+    '#9467bd',  # purple
+    '#8c564b',  # brown
+    '#e377c2',  # pink
+    '#7f7f7f',  # gray
+]
+
+
 def smooth(values: np.ndarray, weight: float = 0.9) -> np.ndarray:
     """Exponential moving average smoothing."""
     smoothed = np.zeros_like(values)
@@ -66,23 +104,33 @@ def plot_learning_curves(log_dir: Path, output_path: Path = None):
             steps = data[tag]['steps']
             values = data[tag]['values']
 
-            # Plot raw and smoothed
-            ax.plot(steps, values, alpha=0.3, color='blue')
-            ax.plot(steps, smooth(values, 0.9), color='blue', linewidth=2, label='Smoothed')
+            # Split into separate runs
+            runs = split_runs(steps, values)
+
+            for run_idx, (run_steps, run_values) in enumerate(runs):
+                if len(run_steps) < 2:
+                    continue
+                color = RUN_COLORS[run_idx % len(RUN_COLORS)]
+                label = f'Run {run_idx + 1}' if len(runs) > 1 else 'Smoothed'
+
+                # Plot raw and smoothed
+                ax.plot(run_steps, run_values, alpha=0.2, color=color)
+                ax.plot(run_steps, smooth(run_values, 0.9), color=color, linewidth=2, label=label)
+
+                # Add final value annotation for the last run
+                if run_idx == len(runs) - 1 and len(run_values) > 0:
+                    final_val = smooth(run_values, 0.9)[-1]
+                    ax.annotate(f'{final_val:.2f}',
+                               xy=(run_steps[-1], final_val),
+                               xytext=(5, 0), textcoords='offset points',
+                               fontsize=10, color=color)
 
             ax.set_xlabel('Steps')
             ax.set_ylabel(title)
             ax.set_title(title)
             ax.grid(True, alpha=0.3)
-            ax.legend()
-
-            # Add final value annotation
-            if len(values) > 0:
-                final_val = smooth(values, 0.9)[-1]
-                ax.annotate(f'{final_val:.2f}',
-                           xy=(steps[-1], final_val),
-                           xytext=(5, 0), textcoords='offset points',
-                           fontsize=10, color='blue')
+            if len(runs) > 1:
+                ax.legend()
         else:
             ax.text(0.5, 0.5, f'No data for\n{tag}',
                    ha='center', va='center', transform=ax.transAxes)
@@ -104,31 +152,43 @@ def plot_learning_curves(log_dir: Path, output_path: Path = None):
     if 'train/episode_reward' in data:
         steps = data['train/episode_reward']['steps']
         values = data['train/episode_reward']['values']
-        axes[0].plot(steps, values, alpha=0.3, color='blue')
-        axes[0].plot(steps, smooth(values, 0.9), color='blue', linewidth=2, label='Train')
+        runs = split_runs(steps, values)
+
+        for run_idx, (run_steps, run_values) in enumerate(runs):
+            if len(run_steps) < 2:
+                continue
+            color = RUN_COLORS[run_idx % len(RUN_COLORS)]
+            label = f'Run {run_idx + 1}' if len(runs) > 1 else 'Train'
+            axes[0].plot(run_steps, run_values, alpha=0.2, color=color)
+            axes[0].plot(run_steps, smooth(run_values, 0.9), color=color, linewidth=2, label=label)
+
         axes[0].set_xlabel('Steps')
         axes[0].set_ylabel('Episode Reward')
         axes[0].set_title('Training Reward')
         axes[0].grid(True, alpha=0.3)
-
-        # Add eval rewards if available
-        if 'eval/episode_reward' in data:
-            eval_steps = data['eval/episode_reward']['steps']
-            eval_values = data['eval/episode_reward']['values']
-            axes[0].scatter(eval_steps, eval_values, color='red', s=50, zorder=5, label='Eval')
-            axes[0].legend()
+        axes[0].legend()
 
     # Success rate plot
     if 'train/episode_success' in data:
         steps = data['train/episode_success']['steps']
         values = data['train/episode_success']['values']
-        axes[1].plot(steps, values, alpha=0.3, color='green')
-        axes[1].plot(steps, smooth(values, 0.9), color='green', linewidth=2)
+        runs = split_runs(steps, values)
+
+        for run_idx, (run_steps, run_values) in enumerate(runs):
+            if len(run_steps) < 2:
+                continue
+            color = RUN_COLORS[run_idx % len(RUN_COLORS)]
+            label = f'Run {run_idx + 1}' if len(runs) > 1 else None
+            axes[1].plot(run_steps, run_values, alpha=0.2, color=color)
+            axes[1].plot(run_steps, smooth(run_values, 0.9), color=color, linewidth=2, label=label)
+
         axes[1].set_xlabel('Steps')
         axes[1].set_ylabel('Success Rate')
         axes[1].set_title('Success Rate')
         axes[1].set_ylim(-0.05, 1.05)
         axes[1].grid(True, alpha=0.3)
+        if len(runs) > 1:
+            axes[1].legend()
 
     plt.tight_layout()
 
@@ -154,13 +214,22 @@ def plot_learning_curves(log_dir: Path, output_path: Path = None):
         if tag in data:
             steps = data[tag]['steps']
             values = data[tag]['values']
+            runs = split_runs(steps, values)
 
-            ax.plot(steps, values, alpha=0.3, color='purple')
-            ax.plot(steps, smooth(values, 0.9), color='purple', linewidth=2)
+            for run_idx, (run_steps, run_values) in enumerate(runs):
+                if len(run_steps) < 2:
+                    continue
+                color = RUN_COLORS[run_idx % len(RUN_COLORS)]
+                label = f'Run {run_idx + 1}' if len(runs) > 1 else None
+                ax.plot(run_steps, run_values, alpha=0.2, color=color)
+                ax.plot(run_steps, smooth(run_values, 0.9), color=color, linewidth=2, label=label)
+
             ax.set_xlabel('Steps')
             ax.set_ylabel(title)
             ax.set_title(title)
             ax.grid(True, alpha=0.3)
+            if len(runs) > 1:
+                ax.legend()
         else:
             ax.text(0.5, 0.5, f'No data for\n{tag}',
                    ha='center', va='center', transform=ax.transAxes)

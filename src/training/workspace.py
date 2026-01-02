@@ -681,11 +681,10 @@ class SO101Workspace:
         print(f"Loaded snapshot from {snapshot_path}, iteration {self._main_loop_iterations}")
 
     def _plot_learning_curves(self, final: bool = False):
-        tb_log_dir = None
-        if hasattr(self.cfg, 'tb') and self.cfg.tb.use:
-            tb_log_dir = Path(self.cfg.tb.log_dir) / self.cfg.tb.name
+        # Tensorboard logs are now saved per-run in work_dir/tb_logs
+        tb_log_dir = self.work_dir / "tb_logs"
 
-        if tb_log_dir is None or not tb_log_dir.exists():
+        if not tb_log_dir.exists():
             return
 
         output_path = self.work_dir / "learning_curves.png"

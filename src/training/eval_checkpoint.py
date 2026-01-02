@@ -103,6 +103,8 @@ def evaluate_with_video(
     frame_size: int = 256,
     curriculum_stage: int = 3,
     reward_version: str = "v11",
+    save_video: bool = True,
+    debug: bool = False,
 ):
     """Evaluate checkpoint and save multi-camera videos."""
 
@@ -180,8 +182,10 @@ def evaluate_with_video(
         print(f"\nEpisode {ep + 1}/{num_episodes}")
 
         # Video writers for this episode
-        video_path = output_dir / f"episode_{ep:02d}.mp4"
-        writer = create_video_writer(video_path)
+        writer = None
+        if save_video:
+            video_path = output_dir / f"episode_{ep:02d}.mp4"
+            writer = create_video_writer(video_path)
 
         obs, info = env.reset()
         done = False
@@ -190,6 +194,14 @@ def evaluate_with_video(
         success = False
 
         frames_collected = []
+
+        # Debug logging data
+        debug_data = {
+            "cube_z": [],
+            "step_reward": [],
+            "is_grasping": [],
+            "gripper_pos": [],
+        }
 
         pbar = tqdm(total=cfg.env.episode_length, desc=f"Ep {ep+1}")
 
@@ -212,11 +224,24 @@ def evaluate_with_video(
             total_reward += reward
             ep_step += 1
 
+            # Debug logging
+            if debug:
+                base_env = env.unwrapped
+                cube_pos = base_env.data.sensor("cube_pos").data.copy()
+                cube_z = cube_pos[2]
+                is_grasping = base_env._is_grasping()
+                gripper_pos = base_env.ik.get_ee_position()
+                debug_data["cube_z"].append(cube_z)
+                debug_data["step_reward"].append(reward)
+                debug_data["is_grasping"].append(is_grasping)
+                debug_data["gripper_pos"].append(gripper_pos)
+
             # Render multi-camera view
-            base_env = env.unwrapped
-            cam_frames = render_multi_camera(base_env, cameras, frame_size)
-            combined = combine_frames(cam_frames, layout="grid" if len(cameras) == 4 else "horizontal")
-            frames_collected.append(combined)
+            if save_video:
+                base_env = env.unwrapped
+                cam_frames = render_multi_camera(base_env, cameras, frame_size)
+                combined = combine_frames(cam_frames, layout="grid" if len(cameras) == 4 else "horizontal")
+                frames_collected.append(combined)
 
             if info.get("is_success", False):
                 success = True
@@ -226,9 +251,37 @@ def evaluate_with_video(
         pbar.close()
 
         # Write video
-        for frame in frames_collected:
-            writer.append_data(frame)
-        writer.close()
+        if save_video and writer is not None:
+            for frame in frames_collected:
+                writer.append_data(frame)
+            writer.close()
+
+        # Print debug summary for this episode
+        if debug:
+            cube_z_arr = np.array(debug_data["cube_z"])
+            rewards_arr = np.array(debug_data["step_reward"])
+            grasping_arr = np.array(debug_data["is_grasping"])
+
+            print(f"\n  --- Debug Summary ---")
+            print(f"  Cube Z: min={cube_z_arr.min():.4f}, max={cube_z_arr.max():.4f}, final={cube_z_arr[-1]:.4f}")
+            print(f"  Rewards: min={rewards_arr.min():.2f}, max={rewards_arr.max():.2f}, mean={rewards_arr.mean():.2f}")
+            print(f"  Grasping: {grasping_arr.sum()}/{len(grasping_arr)} steps ({100*grasping_arr.mean():.1f}%)")
+
+            # Find when cube first reaches threshold heights
+            for threshold in [0.02, 0.04, 0.06, 0.08]:
+                above = np.where(cube_z_arr > threshold)[0]
+                if len(above) > 0:
+                    print(f"  Cube > {threshold:.2f}m: first at step {above[0]}, {len(above)} total steps")
+
+            # Save debug log to file
+            debug_log_path = output_dir / f"episode_{ep:02d}_debug.txt"
+            with open(debug_log_path, "w") as f:
+                f.write("step,cube_z,reward,is_grasping,gripper_x,gripper_y,gripper_z\n")
+                for i in range(len(debug_data["cube_z"])):
+                    gp = debug_data["gripper_pos"][i]
+                    f.write(f"{i},{debug_data['cube_z'][i]:.6f},{debug_data['step_reward'][i]:.4f},"
+                           f"{int(debug_data['is_grasping'][i])},{gp[0]:.6f},{gp[1]:.6f},{gp[2]:.6f}\n")
+            print(f"  Debug log saved: {debug_log_path}")
 
         results.append({
             "episode": ep,
@@ -265,6 +318,8 @@ def main():
     parser.add_argument("--frame_size", type=int, default=256, help="Frame size for rendering")
     parser.add_argument("--curriculum_stage", type=int, default=3, help="Curriculum stage")
     parser.add_argument("--reward_version", type=str, default="v11", help="Reward version")
+    parser.add_argument("--no_video", action="store_true", help="Skip video generation")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging (cube_z, rewards, grasping)")
 
     args = parser.parse_args()
 
@@ -283,6 +338,8 @@ def main():
         frame_size=args.frame_size,
         curriculum_stage=args.curriculum_stage,
         reward_version=args.reward_version,
+        save_video=not args.no_video,
+        debug=args.debug,
     )
 
 
