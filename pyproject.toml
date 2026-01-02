@@ -1,7 +1,7 @@
 [project]
-name = "explore-mujoco"
+name = "pick-101"
 version = "0.1.0"
-description = "RL experiments with SO-101 arm in MuJoCo"
+description = "RL training for SO-101 robot manipulation (grasp, lift, place)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

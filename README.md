@@ -1,12 +1,12 @@
-# explore-mujoco
+# pick-101
 
-MuJoCo simulation environment for SO-101 robot arm manipulation tasks.
+RL training for SO-101 robot manipulation (grasp, lift, place).
 
 ## Installation
 
 ```bash
-git clone <repo-url>
-cd explore-mujoco
+git clone git@github.com:ggand0/pick-101.git
+cd pick-101
 uv sync
 ```
 
