@@ -1173,9 +1173,9 @@ class LiftCubeCartesianEnv(gym.Env):
         if cube_z > self.lift_height:
             reward += 1.0
 
-        # Action rate penalty ONLY during hold phase (not before reaching target)
+        # Action rate penalty ONLY during hold phase at target height
         # This allows free movement during lifting, but encourages stability once at target
-        if action is not None and hold_count > 0:
+        if action is not None and cube_z > self.lift_height and hold_count > 0:
             action_delta = action - self._prev_action
             action_penalty = 0.02 * np.sum(action_delta**2)
             reward -= action_penalty
