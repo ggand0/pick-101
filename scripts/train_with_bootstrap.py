@@ -13,9 +13,15 @@ Usage:
         --bootstrap runs/bootstrap/scripted_grasps.pkl
 """
 
+# Use spawn for multiprocessing (required for EGL/GPU rendering on AMD)
+import multiprocessing
+multiprocessing.set_start_method("spawn", force=True)
+
 import argparse
 import pickle
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +30,12 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.training.workspace import SO101Workspace
-from src.training.config_loader import load_config
+from src.training.config_loader import load_config, instantiate
+from src.training.so101_factory import SO101Factory
+
+# Monkey-patch hydra.utils.instantiate to use our version
+import hydra.utils
+hydra.utils.instantiate = instantiate
 
 
 def load_bootstrap_trajectories(bootstrap_path: Path):
@@ -66,7 +77,11 @@ def add_trajectories_to_buffer(workspace, trajectories, max_episodes: int = None
         if success:
             successful_episodes += 1
 
+        if len(trajectory) == 0:
+            continue
+
         # Add each transition to replay buffer
+        # RoboBase replay buffer expects: add(obs, action, reward, term, trunc)
         for i, trans in enumerate(trajectory):
             obs = trans['obs']
             action = trans['action']
@@ -74,27 +89,19 @@ def add_trajectories_to_buffer(workspace, trajectories, max_episodes: int = None
             terminated = trans['terminated']
             truncated = trans['truncated']
 
-            # Get next observation (or current if terminal)
-            if i + 1 < len(trajectory):
-                next_obs = trajectory[i + 1]['obs']
-            else:
-                next_obs = obs  # Terminal state
-
-            # Format for replay buffer
-            # RoboBase expects specific format
             try:
-                replay_buffer.add(
-                    observation=obs,
-                    action=action,
-                    reward=reward,
-                    terminal=terminated,
-                    truncated=truncated,
-                    next_observation=next_obs,
-                )
+                replay_buffer.add(obs, action, reward, terminated, truncated)
                 total_transitions += 1
             except Exception as e:
-                print(f"Warning: Failed to add transition: {e}")
+                print(f"Warning: Failed to add transition {i}: {e}")
                 break
+
+        # Add final observation for this episode
+        final_obs = trajectory[-1]['obs']
+        try:
+            replay_buffer.add_final(final_obs)
+        except Exception as e:
+            print(f"Warning: Failed to add final obs: {e}")
 
     print(f"Added {total_transitions} transitions from {len(trajectories)} episodes")
     print(f"  Successful episodes: {successful_episodes}")
@@ -128,8 +135,26 @@ def main():
         print(f"Warning: Low success rate ({stats['success_rate']*100:.1f}%)")
         print("Consider adjusting scripted policy or curriculum stage")
 
+    # Create output directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_name = cfg.get("experiment_name", "image_rl") + "_bootstrap"
+    work_dir = Path("runs") / exp_name / timestamp
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy config to output directory
+    shutil.copy(args.config, work_dir / "config.yaml")
+
+    # Copy bootstrap info
+    shutil.copy(bootstrap_path, work_dir / "bootstrap_data.pkl")
+
+    print(f"\nOutput directory: {work_dir}")
+
     # Create workspace
-    workspace = SO101Workspace(cfg)
+    workspace = SO101Workspace(
+        cfg=cfg,
+        env_factory=SO101Factory(),
+        work_dir=str(work_dir),
+    )
 
     # Add bootstrap trajectories to replay buffer
     print("\nSeeding replay buffer with bootstrap trajectories...")
