@@ -668,8 +668,9 @@ class SO101Workspace:
         should_log = utils.Every(self.cfg.log_every)
         eval_every_n = self.cfg.eval_every_steps if self.eval_env is not None else 0
         should_eval = utils.Every(eval_every_n)
-        video_every_n = getattr(self.cfg, "log_eval_video_every", 100000)
-        should_save_video = utils.Every(video_every_n)
+        # Video saving: every N evals (not env steps - that design was broken)
+        video_every_n_evals = getattr(self.cfg, "log_eval_video_every_n_evals", 1)
+        eval_count = 0
         snapshot_every_n = self.cfg.snapshot_every_n if self.cfg.save_snapshot else 0
         should_save_snapshot = utils.Every(snapshot_every_n)
 
@@ -728,7 +729,9 @@ class SO101Workspace:
                 self.logger.log_metrics(metrics, self.global_env_steps, prefix="train")
 
             if should_eval(self.main_loop_iterations):
-                save_video = should_save_video(self.main_loop_iterations) and self.cfg.log_eval_video
+                # Save video every N evals (simpler than trying to align env steps)
+                save_video = (eval_count % video_every_n_evals == 0) and self.cfg.log_eval_video
+                eval_count += 1
                 eval_metrics = self._eval(save_video_and_log=save_video)
                 eval_metrics.update(self._get_common_metrics())
                 self.logger.log_metrics(

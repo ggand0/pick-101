@@ -47,7 +47,7 @@ method:
     mlp_nodes: [256, 256]
 
 # Logging
-log_eval_video_every: 100000  # Save eval video + debug log every 100k steps
+log_eval_video_every_n_evals: 5  # Save video every 5 evals (~400k env steps)
 
 wandb:
   use: false
