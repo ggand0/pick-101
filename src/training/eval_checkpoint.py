@@ -29,7 +29,64 @@ def create_video_writer(path: Path, fps: int = 30):
     return imageio.get_writer(str(path), fps=fps, codec='libx264', quality=8)
 
 
-def render_multi_camera(env: LiftCubeCartesianEnv, cameras: list[str], size: int = 256) -> dict[str, np.ndarray]:
+def add_camera_markers(scene, cam_world_pos: np.ndarray, cam_dir: np.ndarray):
+    """Add 3D markers to scene showing camera position and view direction.
+
+    Adds:
+    - Red sphere at camera position
+    - Green sphere at view target (5cm along view direction)
+    - Green cylinder connecting them
+    """
+    # Target point 5cm along view direction
+    view_target = cam_world_pos + cam_dir * 0.05
+    line_center = (cam_world_pos + view_target) / 2
+    line_length = np.linalg.norm(view_target - cam_world_pos)
+
+    # Rotation matrix to align cylinder with direction
+    z_axis = cam_dir / np.linalg.norm(cam_dir)
+    if abs(z_axis[2]) < 0.9:
+        x_axis = np.cross(np.array([0, 0, 1]), z_axis)
+    else:
+        x_axis = np.cross(np.array([1, 0, 0]), z_axis)
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    y_axis = np.cross(z_axis, x_axis)
+    rot_mat = np.column_stack([x_axis, y_axis, z_axis])
+
+    # Red sphere at camera position
+    mujoco.mjv_initGeom(
+        scene.geoms[scene.ngeom],
+        mujoco.mjtGeom.mjGEOM_SPHERE,
+        np.array([0.008, 0, 0]),
+        cam_world_pos,
+        np.eye(3).flatten(),
+        np.array([1, 0, 0, 1]),
+    )
+    scene.ngeom += 1
+
+    # Green sphere at view target
+    mujoco.mjv_initGeom(
+        scene.geoms[scene.ngeom],
+        mujoco.mjtGeom.mjGEOM_SPHERE,
+        np.array([0.006, 0, 0]),
+        view_target,
+        np.eye(3).flatten(),
+        np.array([0, 1, 0, 1]),
+    )
+    scene.ngeom += 1
+
+    # Green cylinder connecting them
+    mujoco.mjv_initGeom(
+        scene.geoms[scene.ngeom],
+        mujoco.mjtGeom.mjGEOM_CYLINDER,
+        np.array([0.003, line_length / 2, 0]),
+        line_center,
+        rot_mat.flatten(),
+        np.array([0, 1, 0, 0.8]),
+    )
+    scene.ngeom += 1
+
+
+def render_multi_camera(env: LiftCubeCartesianEnv, cameras: list[str], size: int = 256, show_cam_markers: bool = False) -> dict[str, np.ndarray]:
     """Render from multiple camera views.
 
     Supports named cameras (e.g., 'wrist_cam') and virtual views:
@@ -38,6 +95,12 @@ def render_multi_camera(env: LiftCubeCartesianEnv, cameras: list[str], size: int
     - 'front': Front view
     - 'iso': Isometric view
 
+    Args:
+        env: The environment to render from
+        cameras: List of camera names to render
+        size: Output image size (square)
+        show_cam_markers: If True, show wrist camera position/direction markers
+
     Note: wrist_cam uses real camera preprocessing (640x480 -> 480x480 center crop -> size)
     """
     import cv2
@@ -45,6 +108,16 @@ def render_multi_camera(env: LiftCubeCartesianEnv, cameras: list[str], size: int
     frames = {}
     renderer = mujoco.Renderer(env.model, height=size, width=size)
     wrist_renderer = None  # Lazy init for wrist cam
+
+    # Get wrist camera world position and direction for markers
+    cam_world_pos = None
+    cam_dir = None
+    if show_cam_markers:
+        cam_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_CAMERA, "wrist_cam")
+        if cam_id >= 0:
+            cam_world_pos = env.data.cam_xpos[cam_id].copy()
+            cam_world_mat = env.data.cam_xmat[cam_id].reshape(3, 3)
+            cam_dir = -cam_world_mat[:, 2]  # Camera looks along -Z
 
     # Virtual camera configurations: (lookat, distance, azimuth, elevation)
     virtual_cameras = {
@@ -65,6 +138,9 @@ def render_multi_camera(env: LiftCubeCartesianEnv, cameras: list[str], size: int
             cam_obj.azimuth = azim
             cam_obj.elevation = elev
             renderer.update_scene(env.data, camera=cam_obj)
+            # Add camera markers to external views
+            if cam_world_pos is not None and cam_dir is not None:
+                add_camera_markers(renderer._scene, cam_world_pos, cam_dir)
             frames[cam] = renderer.render().copy()
         elif cam == "wrist_cam":
             # Wrist cam with real camera preprocessing (640x480 -> 480x480 center crop)
@@ -124,6 +200,7 @@ def evaluate_with_video(
     reward_version: str = None,
     save_video: bool = True,
     debug: bool = False,
+    show_cam_markers: bool = False,
 ):
     """Evaluate checkpoint and save multi-camera videos."""
 
@@ -279,7 +356,7 @@ def evaluate_with_video(
             # Render multi-camera view
             if save_video:
                 base_env = env.unwrapped
-                cam_frames = render_multi_camera(base_env, cameras, frame_size)
+                cam_frames = render_multi_camera(base_env, cameras, frame_size, show_cam_markers=show_cam_markers)
                 combined = combine_frames(cam_frames, layout="grid" if len(cameras) == 4 else "horizontal")
                 frames_collected.append(combined)
 
@@ -363,6 +440,7 @@ def main():
     parser.add_argument("--reward_version", type=str, default=None, help="Reward version (default: from config)")
     parser.add_argument("--no_video", action="store_true", help="Skip video generation")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging (cube_z, rewards, grasping)")
+    parser.add_argument("--show-cam-markers", action="store_true", help="Show camera position markers (red sphere + green look direction)")
 
     args = parser.parse_args()
 
@@ -383,6 +461,7 @@ def main():
         reward_version=args.reward_version,
         save_video=not args.no_video,
         debug=args.debug,
+        show_cam_markers=args.show_cam_markers,
     )
 
 
