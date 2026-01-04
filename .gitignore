@@ -1,10 +1,13 @@
 CLAUDE.md
+.venv*
 wait_and_train.sh
 **/*.mp4
 devlogs/
 tmp/
 docs/research/
+resources/
 runs/
+wandb/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
