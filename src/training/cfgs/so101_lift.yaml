@@ -1,0 +1,70 @@
+# @package _global_
+# SO-101 Lift Cube environment config for RoboBase
+
+defaults:
+  - /robobase_config
+  - override /method: drqv2
+  - _self_
+
+# SO-101 environment settings
+env:
+  env_name: so101_lift
+  episode_length: 200
+  image_size: 84
+  curriculum_stage: 3  # 0=normal, 1=lifted, 2=table grasp, 3=near cube, 4=far
+  reward_version: v11
+  lock_wrist: false
+  # DrQ-v2 exploration noise schedule: linear decay from 1.0 to 0.1 over 500k steps
+  stddev_schedule: "linear(1.0,0.1,500000)"
+
+# Pixel-based training settings
+pixels: true
+frame_stack: 3
+num_train_envs: 8
+batch_size: 256
+
+# DrQ-v2 specific overrides (smaller network for faster iteration)
+method:
+  encoder_model:
+    channels: 32
+  critic_model:
+    mlp_nodes: [256, 256]
+  actor_model:
+    mlp_nodes: [256, 256]
+
+# Training settings
+num_train_frames: 1000000
+eval_every_steps: 10000
+num_eval_episodes: 10
+
+# Checkpointing
+save_snapshot: true
+snapshot_every_n: 6250  # Save every ~50k steps (6250 iters * 8 envs)
+
+# Replay buffer
+replay:
+  size: 100000
+  prioritization: false
+
+# Logging
+wandb:
+  use: false  # Disabled - fix permissions later
+  entity: gando
+  project: so101-image-rl
+  name: drqv2_lift_s3
+
+tb:
+  use: true
+  log_dir: ./runs/image_rl/tb_logs
+  name: drqv2_lift_s3
+
+# Output directory
+hydra:
+  run:
+    dir: ./runs/image_rl/${now:%Y%m%d_%H%M%S}
+
+# Misc
+seed: 1
+
+# Resume from checkpoint (set via command line)
+resume_from: null

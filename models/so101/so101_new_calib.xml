@@ -111,6 +111,11 @@
                 <site group="3" name="gripperframe" pos="0.0 0.0 -0.0981274" quat="0.707107 -0 0.707107 -2.37788e-17"/>
                 <!-- Frame graspframe (midpoint between fingers, for RL reach reward) -->
                 <site group="3" name="graspframe" pos="0.002338 0.000055 -0.037843" quat="0.707107 -0 0.707107 -2.37788e-17"/>
+                <!-- Wrist camera (calibrated v4: matches real innoMaker 130° camera at 640x480) -->
+                <!-- Position: x=0.02 centers fingers, y=-0.08 forward, z=-0.02 toward wrist -->
+                <!-- Euler: pitch=-25° tilts forward, yaw=180° faces forward -->
+                <!-- FOV: 86° vertical (real camera 4:3 has 103° H, 86° V) -->
+                <camera name="wrist_cam" pos="0.02 -0.08 -0.02" quat="0 0 -0.2164 0.9763" fovy="86"/>
                 <!-- Static fingertip (max mesh-local Z vertices) -->
                 <site group="3" name="static_fingertip" pos="-0.012 0.0 -0.104" rgba="1 0 0 1" size="0.005"/>
                 <!-- Static finger collision pad (box for stable contact) -->

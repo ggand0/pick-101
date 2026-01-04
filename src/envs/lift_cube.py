@@ -66,6 +66,7 @@ class LiftCubeCartesianEnv(gym.Env):
         self._reset_gripper_action = None  # Gripper action used at reset (for curriculum)
         self._prev_action = np.zeros(4)  # Track previous action for smoothness penalty
         self._place_target_pos = None  # Full 3D target position (set at reset)
+        self._open_gripper_count = 0  # Track consecutive steps with open gripper (for v15)
 
         # Load model
         scene_path = Path(__file__).parent.parent.parent / "models/so101/lift_cube.xml"
@@ -177,6 +178,14 @@ class LiftCubeCartesianEnv(gym.Env):
 
         return has_static_contact, has_moving_contact
 
+    def _get_static_finger_pos(self) -> np.ndarray:
+        """Get position of static finger pad centroid."""
+        return self.data.geom_xpos[self._static_pad_geom_id].copy()
+
+    def _get_moving_finger_pos(self) -> np.ndarray:
+        """Get position of moving finger pad centroid."""
+        return self.data.geom_xpos[self._moving_pad_geom_id].copy()
+
     def _is_grasping(self) -> bool:
         """Check if cube is properly grasped (pinched between gripper and jaw)."""
         gripper_state = self._get_gripper_state()
@@ -285,6 +294,7 @@ class LiftCubeCartesianEnv(gym.Env):
         self._hold_count = 0
         self._was_grasping = False
         self._prev_action = np.zeros(4)
+        self._open_gripper_count = 0
 
         return self._get_obs(), self._get_info()
 
@@ -1076,6 +1086,430 @@ class LiftCubeCartesianEnv(gym.Env):
 
         # Success bonus
         if info.get("is_placed", False):
+            reward += 10.0
+
+        return reward
+
+    def _reward_v13(self, info: dict[str, Any], was_grasping: bool = False, action: np.ndarray | None = None) -> float:
+        """V13: v11 with binary lift bonus gated on is_grasping.
+
+        Fixes exploit where agent tilts cube to get lift bonus without proper grasp.
+        """
+        reward = 0.0
+        cube_z = info["cube_z"]
+        gripper_to_cube = info["gripper_to_cube"]
+        is_grasping = info["is_grasping"]
+
+        # Reach reward
+        reach_reward = 1.0 - np.tanh(10.0 * gripper_to_cube)
+        reward += reach_reward
+
+        # Push-down penalty
+        if cube_z < 0.01:
+            push_penalty = (0.01 - cube_z) * 50.0
+            reward -= push_penalty
+
+        # Drop penalty
+        if was_grasping and not is_grasping:
+            reward -= 2.0
+
+        # Grasp bonus
+        if is_grasping:
+            reward += 0.25
+
+            # Continuous lift reward when grasping
+            lift_progress = max(0, cube_z - 0.015) / (self.lift_height - 0.015)
+            reward += lift_progress * 2.0
+
+            # Binary lift bonus (NOW GATED on is_grasping)
+            if cube_z > 0.02:
+                reward += 1.0
+
+        # Target height bonus (aligned with success: z > lift_height)
+        if cube_z > self.lift_height:
+            reward += 1.0
+
+        # Action rate penalty for smoothness (only when lifted, to not hinder lifting)
+        if action is not None and cube_z > 0.06:
+            action_delta = action - self._prev_action
+            action_penalty = 0.01 * np.sum(action_delta**2)
+            reward -= action_penalty
+
+        # Success bonus
+        if info["is_success"]:
+            reward += 10.0
+
+        return reward
+
+    def _reward_v14(self, info: dict[str, Any], was_grasping: bool = False, action: np.ndarray | None = None) -> float:
+        """V14: v13 with action penalty only during hold phase.
+
+        Fixes the 7cm plateau issue where action penalty at 6cm+ blocked the final push to 8cm.
+        Now action penalty only applies during hold phase (hold_count > 0), allowing free
+        movement during lifting while encouraging stability once at target height.
+        """
+        reward = 0.0
+        cube_z = info["cube_z"]
+        gripper_to_cube = info["gripper_to_cube"]
+        is_grasping = info["is_grasping"]
+        hold_count = info["hold_count"]
+
+        # Reach reward
+        reach_reward = 1.0 - np.tanh(10.0 * gripper_to_cube)
+        reward += reach_reward
+
+        # Push-down penalty
+        if cube_z < 0.01:
+            push_penalty = (0.01 - cube_z) * 50.0
+            reward -= push_penalty
+
+        # Drop penalty
+        if was_grasping and not is_grasping:
+            reward -= 2.0
+
+        # Grasp bonus
+        if is_grasping:
+            reward += 0.25
+
+            # Continuous lift reward when grasping
+            lift_progress = max(0, cube_z - 0.015) / (self.lift_height - 0.015)
+            reward += lift_progress * 2.0
+
+            # Binary lift bonus (gated on is_grasping)
+            if cube_z > 0.02:
+                reward += 1.0
+
+        # Target height bonus (aligned with success: z > lift_height)
+        if cube_z > self.lift_height:
+            reward += 1.0
+
+        # Action rate penalty ONLY during hold phase at target height
+        # This allows free movement during lifting, but encourages stability once at target
+        if action is not None and cube_z > self.lift_height and hold_count > 0:
+            action_delta = action - self._prev_action
+            action_penalty = 0.02 * np.sum(action_delta**2)
+            reward -= action_penalty
+
+        # Success bonus
+        if info["is_success"]:
+            reward += 10.0
+
+        return reward
+
+    def _reward_v15(self, info: dict[str, Any], was_grasping: bool = False, action: np.ndarray | None = None) -> float:
+        """V15: v14 + penalty for keeping gripper open too long.
+
+        Addresses the local optimum where agent maximizes reach reward without ever
+        closing the gripper. After a grace period, applies increasing penalty for
+        keeping gripper open (state > 0.3, more open than initial).
+        """
+        reward = 0.0
+        cube_z = info["cube_z"]
+        gripper_to_cube = info["gripper_to_cube"]
+        is_grasping = info["is_grasping"]
+        hold_count = info["hold_count"]
+        gripper_state = info["gripper_state"]
+
+        # Track consecutive steps with gripper open (more than initial 0.3)
+        if gripper_state > 0.3:
+            self._open_gripper_count += 1
+        else:
+            self._open_gripper_count = 0
+
+        # Reach reward
+        reach_reward = 1.0 - np.tanh(10.0 * gripper_to_cube)
+        reward += reach_reward
+
+        # Push-down penalty
+        if cube_z < 0.01:
+            push_penalty = (0.01 - cube_z) * 50.0
+            reward -= push_penalty
+
+        # Drop penalty
+        if was_grasping and not is_grasping:
+            reward -= 2.0
+
+        # Grasp bonus
+        if is_grasping:
+            reward += 0.25
+
+            # Continuous lift reward when grasping
+            lift_progress = max(0, cube_z - 0.015) / (self.lift_height - 0.015)
+            reward += lift_progress * 2.0
+
+            # Binary lift bonus (gated on is_grasping)
+            if cube_z > 0.02:
+                reward += 1.0
+
+        # Target height bonus (aligned with success: z > lift_height)
+        if cube_z > self.lift_height:
+            reward += 1.0
+
+        # Action rate penalty ONLY during hold phase at target height
+        if action is not None and cube_z > self.lift_height and hold_count > 0:
+            action_delta = action - self._prev_action
+            action_penalty = 0.02 * np.sum(action_delta**2)
+            reward -= action_penalty
+
+        # Gripper-open penalty: after 40 steps grace period, penalize keeping gripper open
+        # Penalty grows gradually: 0.05 per step after grace period, capped at 0.3
+        grace_period = 40
+        if self._open_gripper_count > grace_period:
+            excess_steps = self._open_gripper_count - grace_period
+            open_penalty = min(0.05 * excess_steps / 50, 0.3)  # Grows over 50 steps, caps at 0.3
+            reward -= open_penalty
+
+        # Success bonus
+        if info["is_success"]:
+            reward += 10.0
+
+        return reward
+
+    def _reward_v16(self, info: dict[str, Any], was_grasping: bool = False, action: np.ndarray | None = None) -> float:
+        """V16: v14 with increased grasp bonus (1.5 instead of 0.25).
+
+        Addresses the local optimum where agent hovers near cube with open gripper.
+        The weak +0.25 grasp bonus wasn't worth the exploration cost of learning to close.
+        With +1.5, grasping gives ~2.4 reward vs ~0.9 for hovering - a clear incentive.
+
+        Reward breakdown when grasping at target height:
+        - Reach: ~0.9
+        - Grasp: +1.5
+        - Lift progress: +2.0
+        - Binary lift: +1.0
+        - Target height: +1.0
+        - Total: ~6.4
+        """
+        reward = 0.0
+        cube_z = info["cube_z"]
+        gripper_to_cube = info["gripper_to_cube"]
+        is_grasping = info["is_grasping"]
+        hold_count = info["hold_count"]
+
+        # Reach reward
+        reach_reward = 1.0 - np.tanh(10.0 * gripper_to_cube)
+        reward += reach_reward
+
+        # Push-down penalty
+        if cube_z < 0.01:
+            push_penalty = (0.01 - cube_z) * 50.0
+            reward -= push_penalty
+
+        # Drop penalty
+        if was_grasping and not is_grasping:
+            reward -= 2.0
+
+        # Grasp bonus (increased from 0.25 to 1.5)
+        if is_grasping:
+            reward += 1.5
+
+            # Continuous lift reward when grasping
+            lift_progress = max(0, cube_z - 0.015) / (self.lift_height - 0.015)
+            reward += lift_progress * 2.0
+
+            # Binary lift bonus (gated on is_grasping)
+            if cube_z > 0.02:
+                reward += 1.0
+
+        # Target height bonus (aligned with success: z > lift_height)
+        if cube_z > self.lift_height:
+            reward += 1.0
+
+        # Action rate penalty ONLY during hold phase at target height
+        if action is not None and cube_z > self.lift_height and hold_count > 0:
+            action_delta = action - self._prev_action
+            action_penalty = 0.02 * np.sum(action_delta**2)
+            reward -= action_penalty
+
+        # Success bonus
+        if info["is_success"]:
+            reward += 10.0
+
+        return reward
+
+    def _reward_v17(self, info: dict[str, Any], was_grasping: bool = False, action: np.ndarray | None = None) -> float:
+        """V17: Moving finger reach reward with contact cap.
+
+        Addresses the exploration problem where agent never closes gripper because
+        the standard gripper-to-cube reach gives no gradient for closing.
+
+        Key insight: The static finger is fixed to the gripper frame (same as TCP),
+        so we use standard reach for that. The moving finger needs its own reach
+        reward that caps on contact, giving gradient toward closing the gripper.
+
+        Reward structure:
+        - Gripper reach (0 to 1): standard gripper-to-cube distance
+        - Moving finger reach (0 to 1): caps at 1.0 when contact made
+        - Combined: 0.5 * gripper_reach + 0.5 * moving_reach
+
+        When gripper is far from cube (gripper_reach < 0.7):
+        - Just use gripper_reach (no closing incentive yet)
+        - Prevents perverse incentive to open gripper when far
+
+        When gripper is near but open (gripper_reach >= 0.7):
+        - Gripper reach: ~0.9
+        - Moving reach: ~0.5
+        - Total: ~0.7 (gradient to close gripper)
+
+        When gripper closed (is_closed = gripper_state < 0.25):
+        - Gripper reach: ~0.9
+        - Moving reach: 1.0 (capped on close)
+        - Total: ~0.95 + 1.5 grasp bonus (if is_grasping)
+        """
+        reward = 0.0
+        cube_pos = info["cube_pos"]
+        cube_z = info["cube_z"]
+        gripper_to_cube = info["gripper_to_cube"]
+        gripper_state = info["gripper_state"]
+        is_grasping = info["is_grasping"]
+        hold_count = info["hold_count"]
+        is_closed = gripper_state < 0.25
+
+        # Standard gripper reach (static finger is part of gripper frame)
+        gripper_reach = 1.0 - np.tanh(10.0 * gripper_to_cube)
+
+        # Moving finger reach - only applies when gripper is close to cube
+        # This prevents perverse incentive to open gripper when far away
+        reach_threshold = 0.7  # ~3cm from cube
+        if gripper_reach < reach_threshold:
+            # Far from cube: just use gripper reach, no closing incentive yet
+            reach_reward = gripper_reach
+        else:
+            # Close to cube: blend in moving finger reach
+            if is_closed:
+                moving_reach = 1.0  # Gripper closed, moving finger done its job
+            else:
+                moving_finger_pos = self._get_moving_finger_pos()
+                moving_to_cube = np.linalg.norm(moving_finger_pos - cube_pos)
+                moving_reach = 1.0 - np.tanh(10.0 * moving_to_cube)
+
+            # Combined reach reward (0 to 1)
+            reach_reward = (gripper_reach + moving_reach) * 0.5
+
+        reward += reach_reward
+
+        # Push-down penalty
+        if cube_z < 0.01:
+            push_penalty = (0.01 - cube_z) * 50.0
+            reward -= push_penalty
+
+        # Drop penalty
+        if was_grasping and not is_grasping:
+            reward -= 2.0
+
+        # Grasp bonus (1.5 from v16 - strong incentive to grasp)
+        if is_grasping:
+            reward += 1.5
+
+            # Continuous lift reward when grasping
+            lift_progress = max(0, cube_z - 0.015) / (self.lift_height - 0.015)
+            reward += lift_progress * 2.0
+
+            # Binary lift bonus (gated on is_grasping)
+            if cube_z > 0.02:
+                reward += 1.0
+
+        # Target height bonus
+        if cube_z > self.lift_height:
+            reward += 1.0
+
+        # Action rate penalty during hold phase
+        if action is not None and cube_z > self.lift_height and hold_count > 0:
+            action_delta = action - self._prev_action
+            action_penalty = 0.02 * np.sum(action_delta**2)
+            reward -= action_penalty
+
+        # Success bonus
+        if info["is_success"]:
+            reward += 10.0
+
+        return reward
+
+    def _reward_v18(self, info: dict[str, Any], was_grasping: bool = False, action: np.ndarray | None = None) -> float:
+        """V18: v17 with stronger lift incentive.
+
+        Changes from v17:
+        - Doubled lift coefficient: 2.0 → 4.0
+        - Added linear threshold ramp above 0.04m
+
+        The 0.03-0.04m plateau in v17 was caused by weak lift gradient (~0.27/cm)
+        not justifying the drop risk. v18 addresses this with:
+        1. Doubled continuous lift reward (4.0x instead of 2.0x)
+        2. Linear bonus ramp from 0.04m to 0.08m (+2.0 total)
+
+        Reward comparison at key heights (while grasping):
+        - 0.03m: v17=4.0, v18=4.5
+        - 0.04m: v17=4.3, v18=5.0
+        - 0.06m: v17=4.9, v18=6.8
+        - 0.08m: v17=6.0, v18=9.0
+        """
+        reward = 0.0
+        cube_pos = info["cube_pos"]
+        cube_z = info["cube_z"]
+        gripper_to_cube = info["gripper_to_cube"]
+        gripper_state = info["gripper_state"]
+        is_grasping = info["is_grasping"]
+        hold_count = info["hold_count"]
+        is_closed = gripper_state < 0.25
+
+        # Standard gripper reach (static finger is part of gripper frame)
+        gripper_reach = 1.0 - np.tanh(10.0 * gripper_to_cube)
+
+        # Moving finger reach - only applies when gripper is close to cube
+        reach_threshold = 0.7  # ~3cm from cube
+        if gripper_reach < reach_threshold:
+            reach_reward = gripper_reach
+        else:
+            if is_closed:
+                moving_reach = 1.0
+            else:
+                moving_finger_pos = self._get_moving_finger_pos()
+                moving_to_cube = np.linalg.norm(moving_finger_pos - cube_pos)
+                moving_reach = 1.0 - np.tanh(10.0 * moving_to_cube)
+
+            reach_reward = (gripper_reach + moving_reach) * 0.5
+
+        reward += reach_reward
+
+        # Push-down penalty
+        if cube_z < 0.01:
+            push_penalty = (0.01 - cube_z) * 50.0
+            reward -= push_penalty
+
+        # Drop penalty
+        if was_grasping and not is_grasping:
+            reward -= 2.0
+
+        # Grasp bonus
+        if is_grasping:
+            reward += 1.5
+
+            # Continuous lift reward - DOUBLED from v17 (2.0 → 4.0)
+            lift_progress = max(0, cube_z - 0.015) / (self.lift_height - 0.015)
+            reward += lift_progress * 4.0
+
+            # Binary lift bonus at 0.02m
+            if cube_z > 0.02:
+                reward += 1.0
+
+            # Linear threshold ramp from 0.04m to 0.08m (NEW in v18)
+            # Provides +0.5/cm additional gradient in the plateau zone
+            if cube_z > 0.04:
+                threshold_progress = min(1.0, (cube_z - 0.04) / (self.lift_height - 0.04))
+                reward += threshold_progress * 2.0
+
+        # Target height bonus
+        if cube_z > self.lift_height:
+            reward += 1.0
+
+        # Action rate penalty during hold phase
+        if action is not None and cube_z > self.lift_height and hold_count > 0:
+            action_delta = action - self._prev_action
+            action_penalty = 0.02 * np.sum(action_delta**2)
+            reward -= action_penalty
+
+        # Success bonus
+        if info["is_success"]:
             reward += 10.0
 
         return reward

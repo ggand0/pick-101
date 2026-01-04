@@ -1,0 +1,43 @@
+# Image-based lift training configuration
+# Uses wrist camera observations with SAC + CnnPolicy
+
+experiment:
+  name: lift_image
+  base_dir: runs
+
+training:
+  timesteps: 2000000  # 2M steps for image-based learning
+  save_freq: 50000
+  eval_freq: 10000
+  seed: 1
+
+# Image observation settings
+image:
+  size: 84         # 84x84 RGB images
+  camera: wrist_cam
+  frame_stack: 3   # Stack 3 frames for temporal info
+
+# Environment settings
+env:
+  max_episode_steps: 200
+  action_scale: 0.02
+  lift_height: 0.08
+  hold_steps: 10
+  reward_type: dense
+  reward_version: v11
+  curriculum_stage: 3  # Start from near-cube position
+  lock_wrist: true
+
+# SAC hyperparameters (tuned for image-based RL)
+sac:
+  learning_rate: 0.0003
+  buffer_size: 100000   # Smaller buffer for memory (images are large)
+  learning_starts: 1000
+  batch_size: 128       # Smaller batch for GPU memory
+  tau: 0.005
+  gamma: 0.99
+  train_freq: 2         # Update every 2 steps (images are slow)
+  gradient_steps: 2
+  # CNN policy layers (after CNN encoder)
+  policy_layers: [256, 256]
+  qf_layers: [256, 256]
