@@ -80,14 +80,15 @@ PYTHONPATH=. uv run python tests/test_topdown_pick.py
 PYTHONPATH=. uv run python tests/test_topdown_pick.py --viewer
 ```
 
-## Training Pick-and-Lift Agent
+## State-Based RL (SAC)
 
-Train an RL agent (SAC) to grasp a cube and lift it to a target height:
+Train an RL agent using low-dimensional state observations (joint positions, cube pose, etc.):
 
 ```bash
-# Train for 1M steps (~4 hours on RTX 4090)
 PYTHONPATH=. uv run python train_lift.py --config configs/curriculum_stage3.yaml
 ```
+
+Uses v11 reward. Achieves 100% success rate at 1M steps.
 
 The agent learns to:
 1. Approach the cube from above
@@ -125,15 +126,14 @@ PYTHONPATH=. uv run python train_lift.py \
 
 ## Image-Based RL (DrQ-v2)
 
-Train an image-based RL agent using wrist camera observations:
+Train an RL agent using wrist camera observations (84x84 RGB images):
 
 ```bash
-# Train v19 reward (100% success rate at 2M steps)
 MUJOCO_GL=egl uv run python src/training/train_image_rl.py \
     --config configs/drqv2_lift_s3_v19.yaml
 ```
 
-Training takes ~8 hours on RTX 4090 for 2M steps.
+Training takes ~8 hours for 2M steps.
 
 ### Evaluate Checkpoint
 
