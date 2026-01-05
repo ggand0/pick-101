@@ -1,0 +1,62 @@
+# DrQ-v2 Image-Based RL for SO-101 Lift Task
+# Stage 3 curriculum: gripper near cube, needs to grasp and lift
+# Uses v19 reward (v18 + hold count bonus)
+# Preprocessing: 640x480 -> 480x480 center crop -> 84x84
+
+experiment_name: image_rl
+
+# Environment settings
+env:
+  env_name: so101_lift
+  episode_length: 200
+  image_size: 84
+  curriculum_stage: 3  # 0=normal, 1=lifted, 2=table grasp, 3=near cube, 4=far
+  reward_version: v19  # v18 + hold count bonus for sustained height
+  lock_wrist: false
+  stddev_schedule: "linear(1.0,0.1,500000)"
+
+# Pixel-based training
+pixels: true
+frame_stack: 3
+num_train_envs: 8
+batch_size: 256
+
+# Training settings
+num_train_frames: 2000000
+eval_every_steps: 6250  # ~100k env steps (6250 * 16 = 100k)
+num_eval_episodes: 10
+replay_size_before_train: 2000
+action_repeat: 2
+seed: 1
+
+# Checkpointing
+save_snapshot: true
+snapshot_every_n: 6250  # ~100k env steps
+
+# Replay buffer
+replay:
+  size: 100000
+  prioritization: false
+
+# DrQ-v2 method overrides (smaller network for faster iteration)
+method:
+  encoder_model:
+    channels: 32
+  critic_model:
+    mlp_nodes: [256, 256]
+  actor_model:
+    mlp_nodes: [256, 256]
+
+# Logging
+log_eval_video_every_n_evals: 1  # Save video every eval
+
+wandb:
+  use: false
+  entity: gando
+  project: so101-image-rl
+  name: drqv2_lift_s3_v19
+
+tb:
+  use: true
+  log_dir: ./runs/image_rl/tb_logs
+  name: drqv2_lift_s3_v19
