@@ -190,6 +190,61 @@ def combine_frames(frames: dict[str, np.ndarray], layout: str = "horizontal") ->
         return np.concatenate(frame_list, axis=1)
 
 
+def render_x_format(env: LiftCubeCartesianEnv, show_cam_markers: bool = False) -> np.ndarray:
+    """Render 16:9 format for X/Twitter: wrist_cam (720x720) + wide (560x720) = 1280x720.
+
+    The wide view is cropped to 560x720 (80px from each side).
+    Renders at 640x640 max due to framebuffer limits, then upscales.
+    """
+    import cv2
+
+    # Render wrist_cam at native 640x480, crop to 480x480, resize to 720x720
+    wrist_renderer = mujoco.Renderer(env.model, height=480, width=640)
+    wrist_renderer.update_scene(env.data, camera="wrist_cam")
+    wrist_img = wrist_renderer.render()  # (480, 640, 3)
+    # Center crop to 480x480
+    crop_x = (640 - 480) // 2
+    wrist_img = wrist_img[:, crop_x:crop_x + 480, :]
+    # Resize to 720x720
+    wrist_img = cv2.resize(wrist_img, (720, 720), interpolation=cv2.INTER_LINEAR)
+    wrist_renderer.close()
+
+    # Get wrist camera position for markers
+    cam_world_pos = None
+    cam_dir = None
+    if show_cam_markers:
+        cam_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_CAMERA, "wrist_cam")
+        if cam_id >= 0:
+            cam_world_pos = env.data.cam_xpos[cam_id].copy()
+            cam_world_mat = env.data.cam_xmat[cam_id].reshape(3, 3)
+            cam_dir = -cam_world_mat[:, 2]
+
+    # Render wide view at 480x480 (max framebuffer height), then upscale
+    wide_renderer = mujoco.Renderer(env.model, height=480, width=480)
+    lookat, dist, azim, elev = ([0.25, -0.05, 0.05], 0.8, 135, -25)
+    cam_obj = mujoco.MjvCamera()
+    cam_obj.type = mujoco.mjtCamera.mjCAMERA_FREE
+    cam_obj.lookat[:] = lookat
+    cam_obj.distance = dist
+    cam_obj.azimuth = azim
+    cam_obj.elevation = elev
+    wide_renderer.update_scene(env.data, camera=cam_obj)
+    if cam_world_pos is not None and cam_dir is not None:
+        add_camera_markers(wide_renderer._scene, cam_world_pos, cam_dir)
+    wide_img = wide_renderer.render()  # (480, 480, 3)
+    wide_renderer.close()
+
+    # Upscale to 720x720
+    wide_img = cv2.resize(wide_img, (720, 720), interpolation=cv2.INTER_LINEAR)
+
+    # Crop wide to 560x720 (cut 80px from each side)
+    wide_img = wide_img[:, 80:640, :]  # (720, 560, 3)
+
+    # Combine side by side: 720 + 560 = 1280
+    combined = np.concatenate([wrist_img, wide_img], axis=1)  # (720, 1280, 3)
+    return combined
+
+
 def evaluate_with_video(
     snapshot_path: Path,
     num_episodes: int = 5,
@@ -201,8 +256,13 @@ def evaluate_with_video(
     save_video: bool = True,
     debug: bool = False,
     show_cam_markers: bool = False,
+    x_format: bool = False,
 ):
-    """Evaluate checkpoint and save multi-camera videos."""
+    """Evaluate checkpoint and save multi-camera videos.
+
+    Args:
+        x_format: If True, render 16:9 format (1280x720) with wrist_cam + wide view.
+    """
 
     if cameras is None:
         cameras = ["wrist_cam", "closeup", "wide", "wide2"]
@@ -356,8 +416,11 @@ def evaluate_with_video(
             # Render multi-camera view
             if save_video:
                 base_env = env.unwrapped
-                cam_frames = render_multi_camera(base_env, cameras, frame_size, show_cam_markers=show_cam_markers)
-                combined = combine_frames(cam_frames, layout="grid" if len(cameras) == 4 else "horizontal")
+                if x_format:
+                    combined = render_x_format(base_env, show_cam_markers=show_cam_markers)
+                else:
+                    cam_frames = render_multi_camera(base_env, cameras, frame_size, show_cam_markers=show_cam_markers)
+                    combined = combine_frames(cam_frames, layout="grid" if len(cameras) == 4 else "horizontal")
                 frames_collected.append(combined)
 
             if info.get("is_success", False):
@@ -441,6 +504,7 @@ def main():
     parser.add_argument("--no_video", action="store_true", help="Skip video generation")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging (cube_z, rewards, grasping)")
     parser.add_argument("--show-cam-markers", action="store_true", help="Show camera position markers (red sphere + green look direction)")
+    parser.add_argument("--x-format", action="store_true", help="Render 16:9 format (1280x720) for X/Twitter")
 
     args = parser.parse_args()
 
@@ -462,6 +526,7 @@ def main():
         save_video=not args.no_video,
         debug=args.debug,
         show_cam_markers=args.show_cam_markers,
+        x_format=args.x_format,
     )
 
 
