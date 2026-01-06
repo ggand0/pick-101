@@ -35,11 +35,18 @@ class SuccessInfoWrapper(gym.Wrapper):
 class WristCameraWrapper(gym.ObservationWrapper):
     """Adds wrist camera image to observation dict for RoboBase.
 
+    Includes proprioceptive state (joints, gripper) but excludes cube_pos
+    which must be inferred from vision for sim-to-real transfer.
+
     Matches real camera preprocessing:
     1. Render at 640x480 (4:3 aspect ratio like real innoMaker camera)
     2. Center crop to 480x480 (1:1 square)
     3. Resize to target image_size (default 84x84)
     """
+
+    # Proprioception dims: joint_pos(6) + joint_vel(6) + gripper_xyz(3) + gripper_euler(3)
+    # Excludes cube_pos(3) which is privileged sim-only info
+    PROPRIOCEPTION_DIM = 18
 
     def __init__(
         self,
@@ -63,14 +70,7 @@ class WristCameraWrapper(gym.ObservationWrapper):
             width=self._render_width,
         )
 
-        # Get base observation space from wrapped env
-        base_obs_space = env.observation_space
-        if isinstance(base_obs_space, gym.spaces.Dict):
-            base_shape = base_obs_space["low_dim_state"].shape
-        else:
-            base_shape = base_obs_space.shape
-
-        # Create dict observation space with image and low-dim state
+        # Create dict observation space with image and proprioceptive state
         # RoboBase expects (C, H, W) format, not (V, C, H, W)
         self.observation_space = gym.spaces.Dict(
             {
@@ -83,7 +83,7 @@ class WristCameraWrapper(gym.ObservationWrapper):
                 "low_dim_state": gym.spaces.Box(
                     low=-np.inf,
                     high=np.inf,
-                    shape=base_shape,
+                    shape=(self.PROPRIOCEPTION_DIM,),
                     dtype=np.float32,
                 ),
             }
@@ -113,10 +113,10 @@ class WristCameraWrapper(gym.ObservationWrapper):
         # Convert to channels-first (HWC -> CHW)
         img = np.transpose(img, (2, 0, 1))  # (C, H, W)
 
-        return {
-            "rgb": img,
-            "low_dim_state": obs.astype(np.float32),
-        }
+        # Proprioception only: exclude cube_pos (last 3 dims)
+        proprioception = obs[:self.PROPRIOCEPTION_DIM].astype(np.float32)
+
+        return {"rgb": img, "low_dim_state": proprioception}
 
     def close(self):
         if hasattr(self, "_renderer"):
