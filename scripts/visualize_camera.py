@@ -74,7 +74,7 @@ def render_multi_camera(model, data, cameras: list[str], size: int = 256, cam_id
     # Virtual camera configurations: (lookat, distance, azimuth, elevation)
     virtual_cameras = {
         "topdown": ([0.35, 0.0, 0.0], 0.8, 90, -90),
-        "side": ([0.35, 0.0, 0.1], 0.7, 0, -15),
+        "side": ([0.35, 0.0, 0.05], 0.8, 90, -15),
         "front": ([0.35, 0.0, 0.1], 0.7, 90, -15),
         "iso": ([0.35, 0.0, 0.1], 0.8, 135, -30),
     }
