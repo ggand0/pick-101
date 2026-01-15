@@ -160,7 +160,7 @@ def main():
     parser = argparse.ArgumentParser(description="Visualize SO-101 camera views")
     parser.add_argument("--output", type=str, default="runs/camera_test_v5",
                         help="Output directory")
-    parser.add_argument("--model", type=str, default="models/so101/lift_cube.xml",
+    parser.add_argument("--model", type=str, default="models/so101/lift_cube_calibration.xml",
                         help="MuJoCo model path")
     parser.add_argument("--size", type=int, default=256, help="Frame size")
     parser.add_argument("--video", action="store_true", help="Generate video")
