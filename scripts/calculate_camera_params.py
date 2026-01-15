@@ -18,48 +18,46 @@ def get_look_dir(pitch_deg):
 
 
 def calculate_camera_params(
+    A_cm: float,
     B_cm: float,
-    forward_cm: float,
-    cam_x: float = 0.015,
-    cam_z: float = -0.015,
+    forward_cm: float = 0.0,
+    cam_x: float = 0.01,
     gripperframe_z: float = -0.0981,
 ):
     """Calculate camera pitch from position and target.
 
     Args:
+        A_cm: Vertical distance from gripperframe to camera (cm, along +Z toward wrist)
         B_cm: Camera Y offset from gripper center (cm)
-        forward_cm: Target forward offset from gripperframe (cm, in -Z direction toward fingertips)
+        forward_cm: Optional target forward offset from gripperframe (cm, in -Z direction)
         cam_x: Camera X position (m)
-        cam_z: Camera Z position (m)
         gripperframe_z: Z position of gripperframe (m)
     """
+    A = A_cm / 100.0
     B = B_cm / 100.0
     forward = forward_cm / 100.0
 
     cam_y = -B
+    cam_z = gripperframe_z + A  # Camera is A cm above gripperframe
     cam_pos = np.array([cam_x, cam_y, cam_z])
     gripperframe_pos = np.array([0, 0, gripperframe_z])
-    # Forward is along -Z axis (toward fingertips)
     target_pos = gripperframe_pos + np.array([0, 0, -forward])
 
     target_dir = target_pos - cam_pos
     target_dir = target_dir / np.linalg.norm(target_dir)
 
-    # Find best pitch
-    best_pitch = None
-    best_error = float('inf')
-    for pitch in np.linspace(-90, 90, 1801):
-        look = get_look_dir(pitch)
-        error = np.linalg.norm(look - target_dir)
-        if error < best_error:
-            best_error = error
-            best_pitch = pitch
+    # Calculate pitch using arctan
+    # With yaw=180°, camera looks along +Y in world frame when pitch=0
+    # Pitch rotates in the Y-Z plane
+    best_pitch = -np.degrees(np.arctan2(target_dir[1], -target_dir[2]))
 
     print("=" * 60)
     print("INPUTS")
     print("=" * 60)
+    print(f"A (vertical from gripperframe to camera): {A_cm} cm")
     print(f"B (camera Y offset from center): {B_cm} cm")
-    print(f"Forward (target offset from gripperframe): {forward_cm} cm")
+    if forward_cm != 0:
+        print(f"Forward (target offset from gripperframe): {forward_cm} cm")
     print()
 
     print("=" * 60)
@@ -67,7 +65,7 @@ def calculate_camera_params(
     print("=" * 60)
     print(f"Camera:  {cam_pos}")
     print(f"Gripperframe: {gripperframe_pos}")
-    print(f"Target (gripperframe + {forward_cm}cm forward): {target_pos}")
+    print(f"Target: {target_pos}")
     print()
 
     print("=" * 60)
@@ -87,19 +85,20 @@ def calculate_camera_params(
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--A", type=float, required=True,
+                        help="Vertical distance from gripperframe to camera (cm)")
     parser.add_argument("--B", type=float, required=True,
                         help="Camera Y offset from gripper center (cm)")
-    parser.add_argument("--forward", type=float, required=True,
+    parser.add_argument("--forward", type=float, default=0.0,
                         help="Target forward offset from gripperframe (cm)")
-    parser.add_argument("--cam-x", type=float, default=0.015)
-    parser.add_argument("--cam-z", type=float, default=-0.015)
+    parser.add_argument("--cam-x", type=float, default=0.01)
     args = parser.parse_args()
 
     calculate_camera_params(
+        A_cm=args.A,
         B_cm=args.B,
         forward_cm=args.forward,
         cam_x=args.cam_x,
-        cam_z=args.cam_z,
     )
 
 
