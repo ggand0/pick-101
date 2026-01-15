@@ -24,6 +24,11 @@ moving_pad_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "moving_
 
 def setup_camera(angle="wide"):
     """Setup camera for different viewing angles."""
+    if angle == "wrist":
+        return "wrist_cam"  # Use named camera from XML
+    if angle == "wrist+wide":
+        return ["wrist_cam", "wide"]  # Both views
+
     cam = mujoco.MjvCamera()
 
     if angle == "wide":
@@ -67,9 +72,17 @@ def is_grasping():
     return has_static and has_moving
 
 
+def center_crop_square(img):
+    """Center crop 640x480 to 480x480 (matches training preprocessing)."""
+    h, w = img.shape[:2]
+    crop_x = (w - h) // 2  # 80px from each side
+    return img[:, crop_x:crop_x + h, :]
+
+
 def record_topdown_pick(cube_pos, renderer, cam, frame_interval=5, scene_option=None):
     """Record top-down pick sequence, returns frames."""
     frames = []
+    is_wrist = isinstance(cam, str) and cam == "wrist_cam"
 
     height_offset = 0.03
     gripper_open = 0.3
@@ -98,7 +111,10 @@ def record_topdown_pick(cube_pos, renderer, cam, frame_interval=5, scene_option=
 
     def capture():
         renderer.update_scene(data, camera=cam, scene_option=scene_option)
-        return renderer.render().copy()
+        frame = renderer.render().copy()
+        if is_wrist:
+            frame = center_crop_square(frame)
+        return frame
 
     def run_steps(target_pos, gripper_action, steps, gain=0.5):
         for step in range(steps):
@@ -202,7 +218,7 @@ def record_topdown_pick(cube_pos, renderer, cam, frame_interval=5, scene_option=
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--angle", choices=["wide", "close", "top"], default="wide")
+    parser.add_argument("--angle", choices=["wide", "close", "top", "wrist"], default="wide")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--hide-sites", action="store_true", help="Hide site markers (e.g. camera marker)")
