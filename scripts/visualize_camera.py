@@ -58,6 +58,23 @@ def add_camera_markers(scene, cam_world_pos: np.ndarray, cam_dir: np.ndarray):
     scene.ngeom += 1
 
 
+def render_wrist_cam_4x3_cropped(model, data) -> np.ndarray:
+    """Render wrist_cam at 640x480 (4:3) and center-crop to 480x480 square.
+
+    This simulates the real camera pipeline: 640x480 -> center crop to 480x480.
+    """
+    renderer = mujoco.Renderer(model, height=480, width=640)
+    renderer.update_scene(data, camera="wrist_cam")
+    frame = renderer.render().copy()
+    renderer.close()
+
+    # Center crop to 480x480 (crop 80px from each side)
+    crop_x = (640 - 480) // 2
+    cropped = frame[:, crop_x:crop_x + 480, :]
+
+    return cropped
+
+
 def render_multi_camera(model, data, cameras: list[str], size: int = 256, cam_id: int = None) -> dict[str, np.ndarray]:
     """Render from multiple camera views."""
     frames = {}
@@ -125,14 +142,14 @@ def apply_calibrated_camera(model):
 
     cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "wrist_cam")
 
-    # Final calibrated settings (v4):
-    # Position: [0.02, -0.08, -0.02] (x, y, z in gripper local frame)
-    # Euler: [-25, 0, 180] (pitch, yaw, roll in degrees XYZ convention)
+    # Calibrated settings (v5): B=7cm, forward=7cm, cam_z=-0.015
+    # Position: [0.01, -0.07, -0.015] (x, y, z in gripper local frame)
+    # Euler: [-24.6, 0, 180] (pitch, yaw, roll in degrees XYZ convention)
     # FOV: 86 degrees vertical (real camera 4:3 has 103° H, 86° V)
-    model.cam_pos[cam_id] = [0.01, -0.065, -0.008]
-    model.cam_fovy[cam_id] = 86.0
+    model.cam_pos[cam_id] = [0.01, -0.07, -0.015]
+    model.cam_fovy[cam_id] = 70.5
 
-    rot = R.from_euler("xyz", [-15.5, 0, 180], degrees=True)
+    rot = R.from_euler("xyz", [-23.2, 0, 180], degrees=True)
     q = rot.as_quat()  # x,y,z,w
     model.cam_quat[cam_id] = [q[3], q[0], q[1], q[2]]  # w,x,y,z
 
@@ -141,11 +158,12 @@ def apply_calibrated_camera(model):
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize SO-101 camera views")
-    parser.add_argument("--output", type=str, default="runs/camera_test_v3",
+    parser.add_argument("--output", type=str, default="runs/camera_test_v5",
                         help="Output directory")
     parser.add_argument("--model", type=str, default="models/so101/lift_cube.xml",
                         help="MuJoCo model path")
     parser.add_argument("--size", type=int, default=256, help="Frame size")
+    parser.add_argument("--video", action="store_true", help="Generate video")
     parser.add_argument("--steps", type=int, default=100, help="Video steps")
     args = parser.parse_args()
 
@@ -178,33 +196,58 @@ def main():
         imageio.imwrite(str(path), frame)
         print(f"Saved {path}")
 
+    # 4:3 cropped version (simulates real camera pipeline: 640x480 -> 480x480)
+    cropped = render_wrist_cam_4x3_cropped(model, data)
+    cropped_path = output_dir / "wrist_cam_4x3_cropped.png"
+    imageio.imwrite(str(cropped_path), cropped)
+    print(f"Saved {cropped_path}")
+
     # Combined grid
     combined = combine_frames(frames, layout="grid")
     combined_path = output_dir / "combined_grid.png"
     imageio.imwrite(str(combined_path), combined)
     print(f"Saved {combined_path}")
 
-    # Create video with random motion
-    print(f"\nCreating video with {args.steps} steps...")
-    mujoco.mj_resetData(model, data)
+    # Render gripper poses (closed, half-open, fully-open)
+    gripper_idx = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "gripper")
+    gripper_poses = {
+        "closed": -0.17,
+        "half_open": 0.78,
+        "fully_open": 1.74,
+    }
+    print("\nRendering gripper poses...")
+    for pose_name, ctrl_val in gripper_poses.items():
+        mujoco.mj_resetData(model, data)
+        data.ctrl[gripper_idx] = ctrl_val
+        for _ in range(100):
+            mujoco.mj_step(model, data)
+        pose_frames = render_multi_camera(model, data, ["wrist_cam"], args.size, cam_id=cam_id)
+        pose_path = output_dir / f"gripper_{pose_name}.png"
+        imageio.imwrite(str(pose_path), pose_frames["wrist_cam"])
+        print(f"Saved {pose_path}")
 
-    video_frames = []
-    for step in range(args.steps):
-        # Random control
-        ctrl = np.random.uniform(-0.3, 0.3, size=model.nu)
-        data.ctrl[:] = ctrl
-        mujoco.mj_step(model, data)
+    # Create video with random motion (optional)
+    if args.video:
+        print(f"\nCreating video with {args.steps} steps...")
+        mujoco.mj_resetData(model, data)
 
-        cam_frames = render_multi_camera(model, data, cameras, args.size, cam_id=cam_id)
-        combined = combine_frames(cam_frames, layout="grid")
-        video_frames.append(combined)
+        video_frames = []
+        for step in range(args.steps):
+            # Random control
+            ctrl = np.random.uniform(-0.3, 0.3, size=model.nu)
+            data.ctrl[:] = ctrl
+            mujoco.mj_step(model, data)
 
-    video_path = output_dir / "camera_demo.mp4"
-    writer = imageio.get_writer(str(video_path), fps=30, codec="libx264", quality=8)
-    for frame in video_frames:
-        writer.append_data(frame)
-    writer.close()
-    print(f"Saved {video_path}")
+            cam_frames = render_multi_camera(model, data, cameras, args.size, cam_id=cam_id)
+            combined = combine_frames(cam_frames, layout="grid")
+            video_frames.append(combined)
+
+        video_path = output_dir / "camera_demo.mp4"
+        writer = imageio.get_writer(str(video_path), fps=30, codec="libx264", quality=8)
+        for frame in video_frames:
+            writer.append_data(frame)
+        writer.close()
+        print(f"Saved {video_path}")
 
     print(f"\nOutput files in {output_dir}/")
 
