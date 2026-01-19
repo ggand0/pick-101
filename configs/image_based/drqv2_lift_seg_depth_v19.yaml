@@ -1,0 +1,74 @@
+# DrQ-v2 with Segmentation + Depth Observation for Sim-to-Real Transfer
+# Stage 3 curriculum: gripper near cube, needs to grasp and lift
+# Uses v19 reward, v5 camera, seg+depth input
+#
+# 2-channel observation per frame:
+#   Channel 0: Segmentation class IDs (0-4)
+#     0: background (arm, sky)
+#     1: ground/table
+#     2: cube
+#     3: static finger
+#     4: moving finger
+#   Channel 1: Disparity (inverse depth, 0-255)
+#     Matches Depth Anything V2 format: 1=near, 0=far
+#
+# Input shape: (6, 84, 84) from frame_stack=3 of (2, 84, 84)
+
+experiment_name: seg_depth_rl
+
+# Environment settings
+env:
+  env_name: so101_lift
+  episode_length: 200
+  image_size: 84
+  obs_type: seg_depth  # rgb, seg, or seg_depth
+  curriculum_stage: 3
+  reward_version: v19
+  lock_wrist: false
+  stddev_schedule: "linear(1.0,0.1,500000)"
+
+# Pixel-based training
+pixels: true
+frame_stack: 3
+num_train_envs: 8
+batch_size: 256
+
+# Training settings
+num_train_frames: 2000000
+eval_every_steps: 6250
+num_eval_episodes: 10
+replay_size_before_train: 2000
+action_repeat: 2
+seed: 1
+
+# Checkpointing
+save_snapshot: true
+snapshot_every_n: 6250
+
+# Replay buffer
+replay:
+  size: 100000
+  prioritization: false
+
+# DrQ-v2 method (same as RGB baseline)
+method:
+  encoder_model:
+    channels: 32
+  critic_model:
+    mlp_nodes: [256, 256]
+  actor_model:
+    mlp_nodes: [256, 256]
+
+# Logging
+log_eval_video_every_n_evals: 1
+
+wandb:
+  use: false
+  entity: gando
+  project: so101-seg-rl
+  name: drqv2_lift_seg_depth_v19
+
+tb:
+  use: true
+  log_dir: ./runs/seg_depth_rl/tb_logs
+  name: drqv2_lift_seg_depth_v19

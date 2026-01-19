@@ -59,6 +59,7 @@ class MultiCameraVideoRecorder:
         self._renderer = None
         self._wrist_renderer = None  # Separate renderer for wrist cam (640x480)
         self._wrist_seg_renderer = None  # Segmentation renderer for wrist cam
+        self._wrist_depth_renderer = None  # Depth renderer for wrist cam (seg_depth mode)
         self._model = None
 
     def init(self, env, enabled: bool = True):
@@ -74,12 +75,17 @@ class MultiCameraVideoRecorder:
             self._wrist_renderer = mujoco.Renderer(
                 self._model, height=480, width=640
             )
-            # Segmentation renderer for wrist cam (only if seg mode)
-            if self.obs_type == "seg":
+            # Segmentation renderer for wrist cam (seg or seg_depth mode)
+            if self.obs_type in ("seg", "seg_depth"):
                 self._wrist_seg_renderer = mujoco.Renderer(
                     self._model, height=480, width=640
                 )
                 self._wrist_seg_renderer.enable_segmentation_rendering()
+            # Depth renderer for wrist cam (always enabled for middle column)
+            self._wrist_depth_renderer = mujoco.Renderer(
+                self._model, height=480, width=640
+            )
+            self._wrist_depth_renderer.enable_depth_rendering()
         self.record(env)
 
     def _geom_to_class(self, geom_ids: np.ndarray) -> np.ndarray:
@@ -101,10 +107,22 @@ class MultiCameraVideoRecorder:
             rgb[class_map == class_id] = color
         return rgb
 
+    def _depth_to_disparity(self, depth: np.ndarray) -> np.ndarray:
+        """Convert MuJoCo depth to disparity (inverse depth) matching Depth Anything V2 format."""
+        eps = 1e-3
+        disparity = 1.0 / (depth + eps)
+        d_min, d_max = disparity.min(), disparity.max()
+        if d_max - d_min > 1e-6:
+            disparity_norm = (disparity - d_min) / (d_max - d_min)
+        else:
+            disparity_norm = np.ones_like(disparity)
+        return disparity_norm
+
     def _render_wrist_cam(self, data) -> np.ndarray:
         """Render wrist cam with real camera preprocessing (640x480 -> 480x480 center crop).
 
-        In seg mode, returns RGB on left, colorized segmentation on right.
+        In seg mode: RGB | Seg (2 rows)
+        In seg_depth mode: RGB | Disparity | Seg (3 rows)
         """
         import cv2
 
@@ -115,7 +133,32 @@ class MultiCameraVideoRecorder:
         crop_x = (640 - 480) // 2  # 80
         img = img[:, crop_x:crop_x + 480, :]  # (480, 480, 3)
 
-        if self.obs_type == "seg" and self._wrist_seg_renderer is not None:
+        if self.obs_type == "seg_depth" and self._wrist_seg_renderer is not None and self._wrist_depth_renderer is not None:
+            # Render segmentation
+            self._wrist_seg_renderer.update_scene(data, camera="wrist_cam")
+            seg = self._wrist_seg_renderer.render()  # (480, 640, 2)
+            geom_ids = seg[:, :, 0]
+            geom_ids = geom_ids[:, crop_x:crop_x + 480]
+            class_map = self._geom_to_class(geom_ids)
+            seg_colored = self._colorize_seg(class_map)
+
+            # Render depth -> disparity
+            self._wrist_depth_renderer.update_scene(data, camera="wrist_cam")
+            depth = self._wrist_depth_renderer.render()  # (480, 640)
+            depth = depth[:, crop_x:crop_x + 480]
+            disparity = self._depth_to_disparity(depth)
+            disp_uint8 = (disparity * 255).astype(np.uint8)
+            disp_colored = np.stack([disp_uint8, disp_uint8, disp_uint8], axis=-1)
+
+            # Resize all to 1/3 render_size and stack vertically (RGB | Disparity | Seg)
+            third_size = self.render_size // 3
+            img_small = cv2.resize(img, (third_size, third_size), interpolation=cv2.INTER_AREA)
+            disp_small = cv2.resize(disp_colored, (third_size, third_size), interpolation=cv2.INTER_AREA)
+            seg_small = cv2.resize(seg_colored, (third_size, third_size), interpolation=cv2.INTER_NEAREST)
+
+            return np.vstack([img_small, disp_small, seg_small])
+
+        elif self.obs_type == "seg" and self._wrist_seg_renderer is not None:
             # Render segmentation
             self._wrist_seg_renderer.update_scene(data, camera="wrist_cam")
             seg = self._wrist_seg_renderer.render()  # (480, 640, 2)
@@ -154,6 +197,25 @@ class MultiCameraVideoRecorder:
             self._renderer.update_scene(data, camera=cam)
         return self._renderer.render().copy()
 
+    def _render_depth_column(self, data) -> np.ndarray:
+        """Render depth from wrist cam as disparity visualization."""
+        import cv2
+
+        self._wrist_depth_renderer.update_scene(data, camera="wrist_cam")
+        depth = self._wrist_depth_renderer.render()  # (480, 640)
+
+        # Center crop to 480x480
+        crop_x = (640 - 480) // 2
+        depth = depth[:, crop_x:crop_x + 480]
+
+        # Convert to disparity (matching DA V2 format)
+        disparity = self._depth_to_disparity(depth)
+        disp_uint8 = (disparity * 255).astype(np.uint8)
+        disp_colored = np.stack([disp_uint8, disp_uint8, disp_uint8], axis=-1)
+
+        # Resize to render_size
+        return cv2.resize(disp_colored, (self.render_size, self.render_size), interpolation=cv2.INTER_AREA)
+
     def record(self, env):
         if not self.enabled:
             return
@@ -161,19 +223,16 @@ class MultiCameraVideoRecorder:
         base_env = env.unwrapped
         data = base_env.data
 
-        # 3 views: wrist_cam | closeup | wide
+        # 3 views: wrist_cam | depth | wide
         views = []
 
         # 1. Wrist cam (what agent sees - with real camera preprocessing)
         views.append(self._render_wrist_cam(data))
 
-        # 2. Closeup (same as env.render() default - side view close to cube)
-        # Original: lookat=[0.40, -0.10, 0.03], distance=0.35, azimuth=90, elevation=-15
-        closeup_config = ([0.40, -0.10, 0.03], 0.35, 90, -15)
-        views.append(self._render_view(data, closeup_config))
+        # 2. Depth from wrist cam (disparity visualization)
+        views.append(self._render_depth_column(data))
 
         # 3. Wide (diagonal view of arm and cube)
-        # Original: lookat=[0.25, -0.05, 0.05], distance=0.8, azimuth=135, elevation=-25
         wide_config = ([0.25, -0.05, 0.05], 0.8, 135, -25)
         views.append(self._render_view(data, wide_config))
 
@@ -197,6 +256,9 @@ class MultiCameraVideoRecorder:
         if self._wrist_seg_renderer is not None:
             self._wrist_seg_renderer.close()
             self._wrist_seg_renderer = None
+        if self._wrist_depth_renderer is not None:
+            self._wrist_depth_renderer.close()
+            self._wrist_depth_renderer = None
 
 torch.backends.cudnn.benchmark = True
 
