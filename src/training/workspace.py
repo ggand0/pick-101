@@ -35,15 +35,30 @@ from src.training.config_loader import instantiate
 class MultiCameraVideoRecorder:
     """Video recorder that captures wrist_cam | closeup | wide views side-by-side."""
 
-    def __init__(self, save_dir: Path, render_size: int = 256, fps: int = 20):
+    # Segmentation class colors (matches seg_viz.py)
+    SEG_COLORS = {
+        0: (50, 50, 50),      # background - dark gray
+        1: (150, 180, 200),   # ground - tan/blue
+        2: (255, 50, 50),     # cube - red
+        3: (50, 255, 50),     # static finger - green
+        4: (255, 50, 255),    # moving finger - magenta
+    }
+    FLOOR_GEOM_ID = 0
+    CUBE_GEOM_ID = 33
+    STATIC_FINGER_GEOM_IDS = [25, 26, 27, 28, 29]
+    MOVING_FINGER_GEOM_IDS = [30, 31, 32]
+
+    def __init__(self, save_dir: Path, render_size: int = 256, fps: int = 20, obs_type: str = "rgb"):
         self.save_dir = save_dir
         if save_dir is not None:
             self.save_dir.mkdir(exist_ok=True)
         self.render_size = render_size
         self.fps = fps
+        self.obs_type = obs_type
         self.frames = []
         self._renderer = None
         self._wrist_renderer = None  # Separate renderer for wrist cam (640x480)
+        self._wrist_seg_renderer = None  # Segmentation renderer for wrist cam
         self._model = None
 
     def init(self, env, enabled: bool = True):
@@ -59,10 +74,38 @@ class MultiCameraVideoRecorder:
             self._wrist_renderer = mujoco.Renderer(
                 self._model, height=480, width=640
             )
+            # Segmentation renderer for wrist cam (only if seg mode)
+            if self.obs_type == "seg":
+                self._wrist_seg_renderer = mujoco.Renderer(
+                    self._model, height=480, width=640
+                )
+                self._wrist_seg_renderer.enable_segmentation_rendering()
         self.record(env)
 
+    def _geom_to_class(self, geom_ids: np.ndarray) -> np.ndarray:
+        """Map geom IDs to class IDs."""
+        class_map = np.zeros_like(geom_ids, dtype=np.uint8)
+        class_map[geom_ids == self.FLOOR_GEOM_ID] = 1
+        class_map[geom_ids == self.CUBE_GEOM_ID] = 2
+        for gid in self.STATIC_FINGER_GEOM_IDS:
+            class_map[geom_ids == gid] = 3
+        for gid in self.MOVING_FINGER_GEOM_IDS:
+            class_map[geom_ids == gid] = 4
+        return class_map
+
+    def _colorize_seg(self, class_map: np.ndarray) -> np.ndarray:
+        """Convert class map to RGB image."""
+        h, w = class_map.shape
+        rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        for class_id, color in self.SEG_COLORS.items():
+            rgb[class_map == class_id] = color
+        return rgb
+
     def _render_wrist_cam(self, data) -> np.ndarray:
-        """Render wrist cam with real camera preprocessing (640x480 -> 480x480 center crop)."""
+        """Render wrist cam with real camera preprocessing (640x480 -> 480x480 center crop).
+
+        In seg mode, returns RGB on left, colorized segmentation on right.
+        """
         import cv2
 
         self._wrist_renderer.update_scene(data, camera="wrist_cam")
@@ -72,9 +115,29 @@ class MultiCameraVideoRecorder:
         crop_x = (640 - 480) // 2  # 80
         img = img[:, crop_x:crop_x + 480, :]  # (480, 480, 3)
 
-        # Resize to render_size for video
-        img = cv2.resize(img, (self.render_size, self.render_size), interpolation=cv2.INTER_AREA)
-        return img
+        if self.obs_type == "seg" and self._wrist_seg_renderer is not None:
+            # Render segmentation
+            self._wrist_seg_renderer.update_scene(data, camera="wrist_cam")
+            seg = self._wrist_seg_renderer.render()  # (480, 640, 2)
+            geom_ids = seg[:, :, 0]
+
+            # Center crop
+            geom_ids = geom_ids[:, crop_x:crop_x + 480]
+
+            # Convert to class map and colorize
+            class_map = self._geom_to_class(geom_ids)
+            seg_colored = self._colorize_seg(class_map)
+
+            # Resize both to half render_size and stack horizontally
+            half_size = self.render_size // 2
+            img_small = cv2.resize(img, (half_size, half_size), interpolation=cv2.INTER_AREA)
+            seg_small = cv2.resize(seg_colored, (half_size, half_size), interpolation=cv2.INTER_NEAREST)
+
+            # Stack vertically (RGB on top, Seg on bottom)
+            return np.vstack([img_small, seg_small])
+        else:
+            # RGB only - resize to render_size
+            return cv2.resize(img, (self.render_size, self.render_size), interpolation=cv2.INTER_AREA)
 
     def _render_view(self, data, camera_config) -> np.ndarray:
         """Render a single view from camera config."""
@@ -131,6 +194,9 @@ class MultiCameraVideoRecorder:
         if self._wrist_renderer is not None:
             self._wrist_renderer.close()
             self._wrist_renderer = None
+        if self._wrist_seg_renderer is not None:
+            self._wrist_seg_renderer.close()
+            self._wrist_seg_renderer = None
 
 torch.backends.cudnn.benchmark = True
 
@@ -298,8 +364,10 @@ class SO101Workspace:
             )
 
         # Video recorder (multi-camera: wrist_cam | closeup | wide)
+        obs_type = cfg.env.get("obs_type", "rgb")
         self.eval_video_recorder = MultiCameraVideoRecorder(
-            (self.work_dir / "eval_videos") if self.cfg.log_eval_video else None
+            (self.work_dir / "eval_videos") if self.cfg.log_eval_video else None,
+            obs_type=obs_type,
         )
 
         # State tracking
