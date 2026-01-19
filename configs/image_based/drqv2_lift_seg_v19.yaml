@@ -1,18 +1,26 @@
-# DrQ-v2 Image-Based RL for SO-101 Lift Task
+# DrQ-v2 with Segmentation Observation for Sim-to-Real Transfer
 # Stage 3 curriculum: gripper near cube, needs to grasp and lift
-# Uses v19 reward (v18 + hold count bonus)
-# Preprocessing: 640x480 -> 480x480 center crop -> 84x84
+# Uses v19 reward, v5 camera, segmentation mask input
+#
+# Segmentation classes (single-channel, 5 classes):
+#   0: background (arm, sky)
+#   1: ground/table
+#   2: cube
+#   3: static finger
+#   4: moving finger
+#
+# Input shape: (3, 84, 84) from frame_stack=3 of (1, 84, 84) masks
 
-experiment_name: image_rl
+experiment_name: seg_rl
 
 # Environment settings
 env:
   env_name: so101_lift
   episode_length: 200
   image_size: 84
-  obs_type: rgb  # rgb or seg
-  curriculum_stage: 3  # 0=normal, 1=lifted, 2=table grasp, 3=near cube, 4=far
-  reward_version: v19  # v18 + hold count bonus for sustained height
+  obs_type: seg  # rgb or seg
+  curriculum_stage: 3
+  reward_version: v19
   lock_wrist: false
   stddev_schedule: "linear(1.0,0.1,500000)"
 
@@ -24,7 +32,7 @@ batch_size: 256
 
 # Training settings
 num_train_frames: 2000000
-eval_every_steps: 6250  # ~100k env steps (6250 * 16 = 100k)
+eval_every_steps: 6250
 num_eval_episodes: 10
 replay_size_before_train: 2000
 action_repeat: 2
@@ -32,14 +40,14 @@ seed: 1
 
 # Checkpointing
 save_snapshot: true
-snapshot_every_n: 6250  # ~100k env steps
+snapshot_every_n: 6250
 
 # Replay buffer
 replay:
   size: 100000
   prioritization: false
 
-# DrQ-v2 method overrides (smaller network for faster iteration)
+# DrQ-v2 method (same as RGB baseline)
 method:
   encoder_model:
     channels: 32
@@ -49,15 +57,15 @@ method:
     mlp_nodes: [256, 256]
 
 # Logging
-log_eval_video_every_n_evals: 1  # Save video every eval
+log_eval_video_every_n_evals: 1
 
 wandb:
   use: false
   entity: gando
-  project: so101-image-rl
-  name: drqv2_lift_s3_v19
+  project: so101-seg-rl
+  name: drqv2_lift_seg_v19
 
 tb:
   use: true
-  log_dir: ./runs/image_rl/tb_logs
-  name: drqv2_lift_s3_v19
+  log_dir: ./runs/seg_rl/tb_logs
+  name: drqv2_lift_seg_v19

@@ -241,8 +241,8 @@ class SO101Factory(EnvFactory):
 
         # Add wrist camera if pixel mode
         if cfg.pixels:
-            use_seg = cfg.env.get("segmentation", False)
-            wrapper_cls = SegmentationWrapper if use_seg else WristCameraWrapper
+            obs_type = cfg.env.get("obs_type", "rgb")
+            wrapper_cls = SegmentationWrapper if obs_type == "seg" else WristCameraWrapper
             env = wrapper_cls(
                 env,
                 image_size=(cfg.env.image_size, cfg.env.image_size),
