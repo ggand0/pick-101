@@ -124,6 +124,106 @@ class WristCameraWrapper(gym.ObservationWrapper):
         super().close()
 
 
+class SegmentationWrapper(gym.ObservationWrapper):
+    """Outputs segmentation mask instead of RGB for sim-to-real transfer.
+
+    5 classes:
+        0: background (arm, sky, everything else)
+        1: ground/table
+        2: cube
+        3: static finger
+        4: moving finger
+    """
+
+    PROPRIOCEPTION_DIM = 18
+    NUM_CLASSES = 5
+
+    # Geom IDs from MuJoCo model
+    # Note: finger pads (29, 32) are collision-only, not rendered
+    # Use the visible mesh geoms instead
+    FLOOR_GEOM_ID = 0
+    CUBE_GEOM_ID = 33
+    STATIC_FINGER_GEOM_IDS = [25, 26, 27, 28, 29]  # gripper body geoms
+    MOVING_FINGER_GEOM_IDS = [30, 31, 32]  # moving_jaw body geoms
+
+    def __init__(
+        self,
+        env: gym.Env,
+        image_size: tuple[int, int] = (84, 84),
+        camera: str = "wrist_cam",
+    ):
+        super().__init__(env)
+        self.image_size = image_size
+        self.camera = camera
+
+        self._render_width = 640
+        self._render_height = 480
+        self._crop_size = 480
+
+        self._renderer = mujoco.Renderer(
+            self.unwrapped.model,
+            height=self._render_height,
+            width=self._render_width,
+        )
+        self._renderer.enable_segmentation_rendering()
+
+        # Single-channel class IDs
+        self.observation_space = gym.spaces.Dict(
+            {
+                "rgb": gym.spaces.Box(
+                    low=0,
+                    high=self.NUM_CLASSES - 1,
+                    shape=(1, image_size[0], image_size[1]),
+                    dtype=np.uint8,
+                ),
+                "low_dim_state": gym.spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(self.PROPRIOCEPTION_DIM,),
+                    dtype=np.float32,
+                ),
+            }
+        )
+
+    def observation(self, obs: np.ndarray) -> dict[str, np.ndarray]:
+        import cv2
+
+        self._renderer.update_scene(self.unwrapped.data, camera=self.camera)
+        seg = self._renderer.render()  # (H, W, 2): geom_id, geom_type
+
+        geom_ids = seg[:, :, 0]
+
+        # Map geom IDs to class IDs
+        class_map = np.zeros_like(geom_ids, dtype=np.uint8)
+        class_map[geom_ids == self.FLOOR_GEOM_ID] = 1
+        class_map[geom_ids == self.CUBE_GEOM_ID] = 2
+        for gid in self.STATIC_FINGER_GEOM_IDS:
+            class_map[geom_ids == gid] = 3
+        for gid in self.MOVING_FINGER_GEOM_IDS:
+            class_map[geom_ids == gid] = 4
+
+        # Center crop
+        crop_x = (self._render_width - self._crop_size) // 2
+        class_map = class_map[:, crop_x:crop_x + self._crop_size]
+
+        # Resize
+        class_map = cv2.resize(
+            class_map, self.image_size, interpolation=cv2.INTER_NEAREST
+        )
+
+        # Add channel dim (H, W) -> (1, H, W)
+        class_map = class_map[np.newaxis, :, :]
+
+        proprioception = obs[:self.PROPRIOCEPTION_DIM].astype(np.float32)
+
+        return {"rgb": class_map, "low_dim_state": proprioception}
+
+    def close(self):
+        if hasattr(self, "_renderer"):
+            self._renderer.close()
+        super().close()
+
+
 class SO101Factory(EnvFactory):
     """Factory for SO-101 lift cube environment."""
 
@@ -141,7 +241,9 @@ class SO101Factory(EnvFactory):
 
         # Add wrist camera if pixel mode
         if cfg.pixels:
-            env = WristCameraWrapper(
+            use_seg = cfg.env.get("segmentation", False)
+            wrapper_cls = SegmentationWrapper if use_seg else WristCameraWrapper
+            env = wrapper_cls(
                 env,
                 image_size=(cfg.env.image_size, cfg.env.image_size),
                 camera="wrist_cam",
