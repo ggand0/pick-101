@@ -39,17 +39,21 @@ class SoftIoULoss(nn.Module):
 class SegmentationDataset(Dataset):
     """Dataset for semantic segmentation with image/mask pairs."""
 
-    def __init__(self, image_paths, mask_paths, img_size=84, augment=False):
+    def __init__(self, image_paths, mask_paths, img_height=480, img_width=640, augment=False):
         self.image_paths = image_paths
         self.mask_paths = mask_paths
-        self.img_size = img_size
+        self.img_height = img_height
+        self.img_width = img_width
         self.augment = augment
 
-        self.img_transform = transforms.Compose([
-            transforms.Resize((img_size, img_size), interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+        # Color augmentations (only applied to image, not mask)
+        self.color_jitter = transforms.ColorJitter(
+            brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1
+        )
+
+        self.normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        )
 
     def __len__(self):
         return len(self.image_paths)
@@ -57,18 +61,61 @@ class SegmentationDataset(Dataset):
     def __getitem__(self, idx):
         img = Image.open(self.image_paths[idx]).convert("RGB")
         mask = cv2.imread(str(self.mask_paths[idx]), cv2.IMREAD_GRAYSCALE)
-        mask = cv2.resize(mask, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+        mask = Image.fromarray(mask)
 
         if self.augment:
+            # Random resized crop (scale 0.7-1.0, ratio 0.9-1.1)
+            if np.random.rand() > 0.3:
+                # Get random crop parameters
+                scale = np.random.uniform(0.7, 1.0)
+                ratio = np.random.uniform(0.9, 1.1)
+                orig_w, orig_h = img.size
+
+                # Calculate crop size
+                area = orig_w * orig_h * scale
+                new_w = int(np.sqrt(area * ratio))
+                new_h = int(np.sqrt(area / ratio))
+                new_w = min(new_w, orig_w)
+                new_h = min(new_h, orig_h)
+
+                # Random crop position
+                left = np.random.randint(0, orig_w - new_w + 1)
+                top = np.random.randint(0, orig_h - new_h + 1)
+
+                # Apply same crop to both
+                img = img.crop((left, top, left + new_w, top + new_h))
+                mask = mask.crop((left, top, left + new_w, top + new_h))
+
+            # Horizontal flip
             if np.random.rand() > 0.5:
                 img = img.transpose(Image.FLIP_LEFT_RIGHT)
-                mask = np.fliplr(mask).copy()
+                mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
+
+            # Vertical flip
             if np.random.rand() > 0.5:
                 img = img.transpose(Image.FLIP_TOP_BOTTOM)
-                mask = np.flipud(mask).copy()
+                mask = mask.transpose(Image.FLIP_TOP_BOTTOM)
 
-        img_tensor = self.img_transform(img)
-        mask_tensor = torch.from_numpy(mask).long()
+            # Random rotation (-15 to +15 degrees)
+            if np.random.rand() > 0.5:
+                angle = np.random.uniform(-15, 15)
+                img = img.rotate(angle, Image.BILINEAR, fillcolor=(0, 0, 0))
+                mask = mask.rotate(angle, Image.NEAREST, fillcolor=0)
+
+            # Color jitter (image only)
+            img = self.color_jitter(img)
+
+            # Random Gaussian blur
+            if np.random.rand() > 0.7:
+                img = transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))(img)
+
+        # Resize to target size
+        img = img.resize((self.img_width, self.img_height), Image.BILINEAR)
+        mask = mask.resize((self.img_width, self.img_height), Image.NEAREST)
+
+        img_tensor = transforms.ToTensor()(img)
+        img_tensor = self.normalize(img_tensor)
+        mask_tensor = torch.from_numpy(np.array(mask)).long()
         return img_tensor, mask_tensor
 
 
@@ -80,7 +127,8 @@ class EfficientViTSegModule(pl.LightningModule):
         num_classes: int = 6,
         lr: float = 1e-4,
         weight_decay: float = 1e-4,
-        img_size: int = 84,
+        img_height: int = 480,
+        img_width: int = 640,
         loss_type: str = "iou",
     ):
         super().__init__()
@@ -96,7 +144,7 @@ class EfficientViTSegModule(pl.LightningModule):
 
         # Get feature channels
         with torch.no_grad():
-            dummy = torch.randn(1, 3, img_size, img_size)
+            dummy = torch.randn(1, 3, img_height, img_width)
             feats = self.backbone(dummy)
             self.feat_channels = [f.shape[1] for f in feats]
 
@@ -223,8 +271,9 @@ def main():
     parser.add_argument("--selections", type=str, default="data/dataset_v0/selections.json")
     parser.add_argument("--excluded", type=str, default="data/dataset_v0/excluded.json")
     parser.add_argument("--output-dir", type=str, default="outputs/efficientvit_seg")
-    parser.add_argument("--img-size", type=int, default=84)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--img-height", type=int, default=480)
+    parser.add_argument("--img-width", type=int, default=640)
+    parser.add_argument("--batch-size", type=int, default=4)  # Reduced for 640x480
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--num-classes", type=int, default=6)
@@ -239,15 +288,22 @@ def main():
         args.dataset_path, args.selections, args.excluded, val_ratio=0.15, seed=args.seed
     )
 
-    train_dataset = SegmentationDataset(train_imgs, train_masks, img_size=args.img_size, augment=True)
-    val_dataset = SegmentationDataset(val_imgs, val_masks, img_size=args.img_size, augment=False)
+    train_dataset = SegmentationDataset(
+        train_imgs, train_masks, img_height=args.img_height, img_width=args.img_width, augment=True
+    )
+    val_dataset = SegmentationDataset(
+        val_imgs, val_masks, img_height=args.img_height, img_width=args.img_width, augment=False
+    )
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
                             num_workers=args.num_workers, pin_memory=True)
 
-    model = EfficientViTSegModule(num_classes=args.num_classes, lr=args.lr, img_size=args.img_size, loss_type=args.loss)
+    model = EfficientViTSegModule(
+        num_classes=args.num_classes, lr=args.lr,
+        img_height=args.img_height, img_width=args.img_width, loss_type=args.loss
+    )
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         dirpath=args.output_dir,
