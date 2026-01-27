@@ -7,6 +7,7 @@ RL training for SO-101 robot manipulation (grasp, lift, place).
 ```bash
 git clone git@github.com:ggand0/pick-101.git
 cd pick-101
+git submodule update --init --recursive
 uv sync
 ```
 
